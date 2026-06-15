@@ -115,7 +115,7 @@ export class Renderer {
   showNameplates = true;
   // settings-menu graphics knobs (applied live)
   private renderScale = 1; // resolution multiplier on top of the device pixel ratio
-  private baseExposure = 1.12; // tone-mapping exposure at brightness 1.0
+  private baseExposure = 1.16; // tone-mapping exposure at brightness 1.0 (golden-hour lift)
   private tmpV = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
   // floating /say-/yell bubbles, keyed by speaker entity id
@@ -204,10 +204,12 @@ export class Renderer {
       pmrem.dispose(); // prefiltered envRTs stay alive for the session
     }
 
-    const hemi = new THREE.HemisphereLight(0xcfe8ff, 0x46603a, LOW_GFX ? 1.0 : HEMI_INTENSITY);
+    // Golden-hour key/fill: a cool sky-blue ambient against a warm golden sun
+    // gives the warm/cool contrast that reads as late-afternoon light.
+    const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x5a5236, LOW_GFX ? 1.0 : HEMI_INTENSITY);
     this.scene.add(hemi);
     this.hemi = hemi;
-    const sun = new THREE.DirectionalLight(LOW_GFX ? 0xfff0cd : 0xffedd0, LOW_GFX ? 2.2 : SUN_INTENSITY);
+    const sun = new THREE.DirectionalLight(LOW_GFX ? 0xffe6ad : 0xffdca0, LOW_GFX ? 2.2 : SUN_INTENSITY);
     sun.position.copy(SUN_ANCHOR);
     sun.castShadow = !LOW_GFX;
     sun.shadow.mapSize.set(GFX.shadowMap, GFX.shadowMap);
