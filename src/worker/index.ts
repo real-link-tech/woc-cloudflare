@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { requireClerkUser } from './auth';
-import { signPlayToken } from './play-token';
+import { signPlayToken, verifyPlayToken } from './play-token';
 import { charactersRoutes } from './characters-routes';
+import { resolveRealm, parsePlayTokenFromUrl } from './realm-protocol';
 
 type Env = {
   ASSETS: { fetch: (req: Request) => Promise<Response> };
@@ -36,6 +37,24 @@ app.post('/api/woc/play-token', async (c) => {
 });
 
 app.route('/api/woc/characters', charactersRoutes);
+
+// WebSocket entry to the live world. A WS upgrade can't carry an Authorization
+// header, so the play-token rides in ?token=. We validate it here, then forward
+// the upgrade to the realm's Durable Object with the resolved identity as
+// headers (the DO trusts these because only this worker can reach it).
+app.get('/ws', async (c) => {
+  if (c.req.header('Upgrade') !== 'websocket') return c.text('expected websocket', 426);
+  const token = parsePlayTokenFromUrl(c.req.url);
+  const claims = token ? await verifyPlayToken(token, c.env.PLAY_SESSION_SIGNING_SECRET) : null;
+  if (!claims) return c.text('not authenticated', 401);
+  const realm = resolveRealm(new URL(c.req.url).searchParams.get('realm') ?? undefined);
+  const stub = c.env.WORLD_REALMS.get(c.env.WORLD_REALMS.idFromName(realm));
+  const fwd = new Request('https://realm.internal/ws', c.req.raw);
+  fwd.headers.set('x-woc-user', claims.userId);
+  fwd.headers.set('x-woc-character', String(claims.characterId));
+  fwd.headers.set('x-woc-realm', realm);
+  return stub.fetch(fwd);
+});
 
 // A path whose last segment carries a non-HTML file extension (e.g. .glb, .js,
 // .png) is an asset request, not a client route. Missing assets must 404 — if
