@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { requireClerkUser } from './auth';
+import { signPlayToken } from './play-token';
 
 type Env = {
   ASSETS: { fetch: (req: Request) => Promise<Response> };
@@ -17,6 +18,18 @@ app.get('/api/woc/me', async (c) => {
   const user = await requireClerkUser(c.req.header('Authorization') ?? null, c.env.CLERK_JWT_ISSUER);
   if (!user) return c.json({ error: 'not authenticated' }, 401);
   return c.json({ userId: user.userId });
+});
+
+app.post('/api/woc/play-token', async (c) => {
+  const user = await requireClerkUser(c.req.header('Authorization') ?? null, c.env.CLERK_JWT_ISSUER);
+  if (!user) return c.json({ error: 'not authenticated' }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const characterId = Number((body as { character?: unknown }).character);
+  if (!Number.isFinite(characterId)) return c.json({ error: 'invalid character' }, 400);
+  // NOTE (M1): once characters live in the DB, verify this user owns characterId
+  // before minting. M0 mints for any authed user to exercise the flow.
+  const token = await signPlayToken({ userId: user.userId, characterId }, c.env.PLAY_SESSION_SIGNING_SECRET, 120);
+  return c.json({ token });
 });
 
 // A path whose last segment carries a non-HTML file extension (e.g. .glb, .js,
