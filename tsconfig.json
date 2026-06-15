@@ -12,5 +12,7 @@
     "isolatedModules": true,
     "types": ["vite/client", "node"]
   },
-  "include": ["src", "headless", "tests", "server"]
+  "include": ["src", "headless", "tests", "server"],
+  "comment": "src/worker is the Cloudflare Worker runtime; it has its own tsconfig.worker.json (workers-types/pg, no DOM). The client config must not type-check it.",
+  "exclude": ["src/worker"]
 }
