@@ -19,12 +19,23 @@ app.get('/api/woc/me', async (c) => {
   return c.json({ userId: user.userId });
 });
 
-// Static client: SPA fallback to index.html for non-API, non-asset paths.
+// A path whose last segment carries a non-HTML file extension (e.g. .glb, .js,
+// .png) is an asset request, not a client route. Missing assets must 404 — if
+// they SPA-fell-back to index.html, a missing .glb would surface as a cryptic
+// GLTFLoader parse error instead of a clear 404 (matches the original server).
+function looksLikeAsset(pathname: string): boolean {
+  const last = pathname.split('/').pop() ?? '';
+  const ext = last.includes('.') ? last.slice(last.lastIndexOf('.')).toLowerCase() : '';
+  return ext !== '' && ext !== '.html';
+}
+
+// Static client: serve built assets; SPA-fallback to index.html only for
+// extensionless client routes, never for missing asset files.
 app.all('*', async (c) => {
   const url = new URL(c.req.url);
   if (url.pathname.startsWith('/api/')) return c.json({ error: 'unknown endpoint' }, 404);
   const res = await c.env.ASSETS.fetch(c.req.raw);
-  if (res.status !== 404) return res;
+  if (res.status !== 404 || looksLikeAsset(url.pathname)) return res;
   const indexReq = new Request(new URL('/index.html', url), c.req.raw);
   return c.env.ASSETS.fetch(indexReq);
 });
