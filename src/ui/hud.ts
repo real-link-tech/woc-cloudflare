@@ -110,9 +110,10 @@ export interface BuildAsset {
   thumbUrl: string | null;
 }
 
-// The IPIO asset library search endpoint (dev). CORS is `*`; the public Kenney
-// library needs no auth. We fetch GLB-bearing models so they can be placed.
-const IPIO_ASSET_SEARCH = 'https://api-dev.ipio.ai/api/v1/ip-assets/';
+// The IPIO asset library search endpoint (dev). NOTE: no trailing slash (the
+// slashed path 404s). Requires the player's Clerk JWT + a synced IPIO workspace.
+const IPIO_ASSET_SEARCH = 'https://api-dev.ipio.ai/api/v1/ip-assets';
+const IPIO_USER_SYNC = 'https://api-dev.ipio.ai/api/v1/users/sync';
 
 // Only GLBs served from an IPIO host are accepted by the server (it rejects
 // foreign URLs), so filter the same way client-side to avoid doomed placements.
@@ -131,43 +132,47 @@ function resolveBuildAsset(item: any): BuildAsset | null {
   if (!item || typeof item !== 'object') return null;
   const renditions: any[] = Array.isArray(item.renditions) ? item.renditions : [];
 
-  // 1) a rendition that is itself a GLB (by content type or engine-manifest role)
-  let glbUrl: string | null = null;
-  for (const r of renditions) {
-    const ct = r?.contentType ?? r?.content_type;
-    if (ct === 'model/gltf-binary' || r?.role === 'engine-manifest') {
-      const u = r?.url ?? r?.externalUrl ?? r?.external_url;
-      if (typeof u === 'string') { glbUrl = u; break; }
-    }
-  }
-  // 2) otherwise a model file declared in a rendition's metadata.files[]
-  if (!glbUrl) {
-    for (const r of renditions) {
-      const files: any[] = Array.isArray(r?.metadata?.files) ? r.metadata.files : [];
-      for (const f of files) {
-        const fct = f?.contentType ?? f?.content_type;
-        if (f?.role === 'model' || fct === 'model/gltf-binary') {
-          const u = f?.url ?? f?.externalUrl ?? f?.external_url;
-          if (typeof u === 'string') { glbUrl = u; break; }
-        }
-      }
-      if (glbUrl) break;
-    }
-  }
-  if (!glbUrl || !isIpioHost(glbUrl)) return null;
-
-  // thumbnail: a thumbnail rendition, else the item's own thumbnailUrl, else none
+  // Thumbnail (concept-art / thumbnail rendition). Also the KEY to the stable GLB
+  // url: the public webp lives at .../<pack>/thumbnails/<name>.webp and the GLB at
+  // the sibling .../<pack>/models/<file>.glb.
   let thumbUrl: string | null = null;
   for (const r of renditions) {
-    if (r?.role === 'thumbnail') {
-      const u = r?.url ?? r?.externalUrl ?? r?.external_url ?? item.thumbnailUrl;
+    if (r?.role === 'concept-art' || r?.role === 'thumbnail') {
+      const u = r?.url ?? r?.externalUrl;
       if (typeof u === 'string') { thumbUrl = u; break; }
     }
   }
   if (!thumbUrl && typeof item.thumbnailUrl === 'string') thumbUrl = item.thumbnailUrl;
 
-  const ipAssetId = String(item.id ?? item.ipAssetId ?? item.assetId ?? glbUrl);
-  const name = String(item.name ?? item.title ?? item.displayName ?? 'Asset');
+  // The engine-manifest rendition's files[] declares the GLB (role 'mesh' or a
+  // .glb path). Its own `url` is a SIGNED, EXPIRING api url — unusable for a
+  // persisted placement — so we instead derive the STABLE public CDN url from the
+  // thumbnail path + the file's name. Fall back to a direct, unsigned .glb url.
+  let filePath: string | null = null;
+  let directGlb: string | null = null;
+  for (const r of renditions) {
+    const files: any[] = Array.isArray(r?.metadata?.files) ? r.metadata.files : [];
+    for (const f of files) {
+      const path = typeof f?.path === 'string' ? f.path : '';
+      const fct = f?.contentType ?? f?.content_type;
+      const isGlb = f?.role === 'mesh' || f?.role === 'model' || fct === 'model/gltf-binary' || /\.glb$/i.test(path);
+      if (!isGlb) continue;
+      if (path) filePath = path;
+      const u = f?.url ?? f?.externalUrl;
+      if (typeof u === 'string' && /\.glb(\?|$)/i.test(u) && isIpioHost(u) && !/[?&]sig=/.test(u)) directGlb = u;
+    }
+  }
+
+  let glbUrl: string | null = null;
+  if (thumbUrl && filePath) {
+    const base = thumbUrl.replace(/\/thumbnails\/[^/]+$/i, '/models/');
+    if (base !== thumbUrl) glbUrl = base + filePath;
+  }
+  if (!glbUrl && directGlb) glbUrl = directGlb;
+  if (!glbUrl || !isIpioHost(glbUrl)) return null;
+
+  const ipAssetId = String(item.id ?? item.ipAssetId ?? glbUrl);
+  const name = String(item.title ?? item.name ?? 'Asset');
   return { ipAssetId, glbUrl, name, thumbUrl };
 }
 
@@ -2438,6 +2443,25 @@ export class Hud {
     el.querySelector('[data-close]')?.addEventListener('click', () => { el.style.display = 'none'; this.hideTooltip(); });
   }
 
+  private ipioSynced = false;
+  // Provision the player's IPIO user + workspace (idempotent) so the asset-library
+  // endpoints grant access. Without this, ip-assets returns 403 "Workspace access
+  // denied". Called once before the first asset search.
+  private async ensureIpioSynced(auth: Record<string, string>): Promise<void> {
+    if (this.ipioSynced || !auth.Authorization) return;
+    try {
+      const clerk = (window as unknown as { Clerk?: { user?: { primaryEmailAddress?: { emailAddress?: string }; fullName?: string } } }).Clerk;
+      const email = clerk?.user?.primaryEmailAddress?.emailAddress;
+      const name = clerk?.user?.fullName || 'Player';
+      const res = await fetch(IPIO_USER_SYNC, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ email, name }),
+      });
+      if (res.ok) this.ipioSynced = true;
+    } catch { /* non-fatal; the search will surface any access error */ }
+  }
+
   private async runBuildSearch(query: string): Promise<void> {
     const el = $('#build-panel');
     if (el.style.display !== 'block') return;
@@ -2448,8 +2472,15 @@ export class Hud {
     status.textContent = 'Searching…';
     let items: any[] = [];
     try {
-      const url = `${IPIO_ASSET_SEARCH}?source=kenney&includePublicLibrary=true&limit=24&query=${encodeURIComponent(query)}`;
-      const res = await fetch(url);
+      // The IPIO asset API requires auth (the player's Clerk JWT, the shared-IPIO
+      // session) AND a synced IPIO workspace — sync once before the first search.
+      const token = await window.__wocClerkToken?.();
+      const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      await this.ensureIpioSynced(auth);
+      // kind=prop is the 3D Kenney model set; includePublicLibrary unions the
+      // public library. (source=kenney 404s; the slashed path 404s.)
+      const url = `${IPIO_ASSET_SEARCH}?includePublicLibrary=true&kind=prop&limit=24&query=${encodeURIComponent(query)}`;
+      const res = await fetch(url, { headers: auth });
       if (!res.ok) throw new Error(`search failed (${res.status})`);
       const json = await res.json();
       items = Array.isArray(json?.data?.items) ? json.data.items
