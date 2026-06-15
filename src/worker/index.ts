@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { requireClerkUser } from './auth';
 import { signPlayToken } from './play-token';
+import { charactersRoutes } from './characters-routes';
 
 type Env = {
   ASSETS: { fetch: (req: Request) => Promise<Response> };
@@ -8,6 +9,8 @@ type Env = {
   CLERK_PUBLISHABLE_KEY: string;
   CLERK_SECRET_KEY: string;
   PLAY_SESSION_SIGNING_SECRET: string;
+  HYPERDRIVE: { connectionString: string };
+  WORLD_REALMS: DurableObjectNamespace;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -31,6 +34,8 @@ app.post('/api/woc/play-token', async (c) => {
   const token = await signPlayToken({ userId: user.userId, characterId }, c.env.PLAY_SESSION_SIGNING_SECRET, 120);
   return c.json({ token });
 });
+
+app.route('/api/woc/characters', charactersRoutes);
 
 // A path whose last segment carries a non-HTML file extension (e.g. .glb, .js,
 // .png) is an asset request, not a client route. Missing assets must 404 — if
