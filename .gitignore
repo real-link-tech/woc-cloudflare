@@ -27,3 +27,6 @@ __pycache__/
 Thumbs.db
 *.log
 .claude/
+
+# wrangler local dev state
+.wrangler/
