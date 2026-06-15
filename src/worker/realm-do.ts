@@ -9,11 +9,15 @@
 // players see the movement. Combat/quests come "for free" because the Sim
 // computes them internally; the DO only feeds input and serializes snapshots.
 // Chat/party/trade/duel/social/market/quest/loadout commands are deferred to M2.
+import { Pool } from 'pg';
 import { Sim, type CharacterState } from '../sim/sim';
 import type { Entity, PlayerClass, SimEvent } from '../sim/types';
 import { DT } from '../sim/types';
 import { parseMoveInputFrame } from '../sim/move_input';
+import { zoneAt, DUNGEONS } from '../sim/data';
 import { createWocDb, type WocDb } from './db';
+import { PgSocialDb } from './social-db';
+import { SocialService, type SocialActor, type SocialEvent, type SocialTransport, type Presence, type PresenceStatus } from './social';
 import { round2, wireEntity } from './wire';
 
 export interface WorldEnv {
@@ -29,6 +33,11 @@ interface Conn {
   name: string;
   dbSessionId: number | null;
   lastSave: number;
+  // Set of character ids this player has ignored, loaded on join. Drives the
+  // chat-ignore filter (say chat in routeEvents + guild/officer in the service).
+  blockedIds: Set<number>;
+  // Friends + guildmates to push live positions to (the cheap socialpos tick).
+  socialTrackedIds?: number[];
 }
 
 // Squared interest radius: a player only receives entities within 100 units.
@@ -49,8 +58,18 @@ export class WorldRealmDurableObject {
   private db: WocDb | null = null;
   private interval: number | null = null;
 
+  // Social system (friends/ignore/guilds/presence). PgSocialDb needs a raw pg
+  // Pool, so the DO owns one pool (created lazily on first connect, max 5,
+  // alongside WocDb's own pool) and tears it down on drain. SocialService is the
+  // pure engine wired to that DB + a transport bridging to live DO state.
+  private socialPool: Pool | null = null;
+  private socialDb: PgSocialDb | null = null;
+  private social: SocialService | null = null;
+
   private readonly conns = new Map<WebSocket, Conn>();
   private readonly sockets = new Set<WebSocket>();
+  // Reverse index: character id → live connection, for the social transport.
+  private readonly connsByCharId = new Map<number, Conn>();
 
   // Shared World Market realm state: loaded once per sim lifetime, persisted on
   // autosave + drain. `marketRealm` is captured on first connect so the save
@@ -90,8 +109,15 @@ export class WorldRealmDurableObject {
     if (!this.db) {
       this.db = createWocDb(this.env.HYPERDRIVE.connectionString);
     }
+    if (!this.social) {
+      this.socialPool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, max: 5 });
+      this.socialDb = new PgSocialDb(this.socialPool, realm);
+      this.social = new SocialService(this.socialDb, this.buildSocialTransport());
+    }
     const sim = this.sim;
     const db = this.db;
+    const social = this.social;
+    const socialDb = this.socialDb!;
 
     // The World Market is shared realm state. Load it once per sim lifetime (the
     // listings array is empty on a fresh sim); tolerate a missing row.
@@ -133,9 +159,11 @@ export class WorldRealmDurableObject {
       name: character.name,
       dbSessionId: null,
       lastSave: Date.now(),
+      blockedIds: new Set(),
     };
     this.conns.set(server, conn);
     this.sockets.add(server);
+    this.connsByCharId.set(characterId, conn);
 
     // Open a play session for analytics; fire-and-forget so connect stays snappy.
     db.openPlaySession(userId, characterId, character.name)
@@ -150,6 +178,17 @@ export class WorldRealmDurableObject {
     });
     server.addEventListener('close', () => { void this.handleClose(conn); });
     server.addEventListener('error', () => { void this.handleClose(conn); });
+
+    // Social init (mirrors GameServer.initSocial): load the ignore list, send
+    // the friends/ignore/guild panel, and announce presence to friends/guildmates.
+    try {
+      conn.blockedIds = new Set(await socialDb.blockedIds(characterId));
+    } catch (err) {
+      console.error('failed to load block list:', err);
+    }
+    await this.sendSocialSnapshot(characterId);
+    void social.announcePresence({ characterId, name: conn.name }, true)
+      .catch((err) => console.error('presence announce failed:', err));
 
     this.startLoop();
     // Watchdog: keep the alarm armed while players are connected.
@@ -216,11 +255,48 @@ export class WorldRealmDurableObject {
           break;
         case 'buyback': if (typeof msg.item === 'string') sim.buyBackItem(msg.item, pid); break;
         case 'release': sim.releaseSpirit(pid); break;
-        // Minimal chat: emit a world/say SimEvent via the sim; the resulting
-        // chat events flow to clients through routeEvents. /who, guild/officer
-        // (/g,/o), and whisper-/r routing need the DB-backed SocialService and
-        // are deferred.
-        case 'chat': if (typeof msg.text === 'string') sim.chat(msg.text, pid); break;
+        // Chat: /who lists online players; /g,/gu,/guild route to guild chat and
+        // /o,/officer to officer chat (both DB-backed via SocialService); anything
+        // else (say / /w whisper / emote) goes to the sim, whose chat SimEvents
+        // flow to clients through routeEvents. NOTE: the Node server's /r reply
+        // and per-session chat rate-limiting are not ported here (see report).
+        case 'chat': {
+          if (typeof msg.text !== 'string') break;
+          const text = String(msg.text).trim();
+          if (!text) break;
+          if (/^\/who(\s|$)/i.test(text)) {
+            this.sendWhoRoster(conn);
+            break;
+          }
+          const gm = /^\/(?:g|gu|guild)\s+([\s\S]+)$/i.exec(text);
+          const om = gm ? null : /^\/(?:o|officer)\s+([\s\S]+)$/i.exec(text);
+          if (gm || om) {
+            const body = (gm ?? om!)[1];
+            const actor: SocialActor = { characterId: conn.characterId, name: conn.name };
+            const route = gm ? this.social?.guildChat(actor, body) : this.social?.officerChat(actor, body);
+            void route?.catch((err) => console.error('guild/officer chat failed:', err));
+            break;
+          }
+          sim.chat(text, pid);
+          break;
+        }
+        // social: friends / ignore (persistent, character-scoped via SocialService)
+        case 'friend_add': if (typeof msg.name === 'string') void this.social?.friendAdd(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'friend_remove': if (typeof msg.name === 'string') void this.social?.friendRemove(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'block_add': if (typeof msg.name === 'string') void this.social?.blockAdd(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'block_remove': if (typeof msg.name === 'string') void this.social?.blockRemove(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'social_refresh': void this.sendSocialSnapshot(conn.characterId); break;
+        // guilds
+        case 'guild_create': if (typeof msg.name === 'string') void this.social?.guildCreate(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'guild_invite': if (typeof msg.name === 'string') void this.social?.guildInvite(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'guild_accept': void this.social?.guildAccept(this.actorFor(conn)).catch(console.error); break;
+        case 'guild_decline': this.social?.guildDecline(this.actorFor(conn)); break;
+        case 'guild_leave': void this.social?.guildLeave(this.actorFor(conn)).catch(console.error); break;
+        case 'guild_kick': if (typeof msg.name === 'string') void this.social?.guildKick(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'guild_promote': if (typeof msg.name === 'string') void this.social?.guildSetRank(this.actorFor(conn), msg.name, 'officer').catch(console.error); break;
+        case 'guild_demote': if (typeof msg.name === 'string') void this.social?.guildSetRank(this.actorFor(conn), msg.name, 'member').catch(console.error); break;
+        case 'guild_transfer': if (typeof msg.name === 'string') void this.social?.guildTransferLeader(this.actorFor(conn), msg.name).catch(console.error); break;
+        case 'guild_disband': void this.social?.guildDisband(this.actorFor(conn)).catch(console.error); break;
         // party
         case 'pinvite': if (typeof msg.id === 'number') sim.partyInvite(msg.id, pid); break;
         case 'paccept': sim.partyAccept(pid); break;
@@ -302,8 +378,7 @@ export class WorldRealmDurableObject {
           if (exit) sim.leaveDungeon(pid);
           break;
         }
-        // Skipped (need DB-backed SocialService — not ported): friend_*, block_*,
-        // guild_*, social_refresh. Skipped (dev/ops): dev_level/dev_teleport/dev_give.
+        // Skipped (dev/ops): dev_level/dev_teleport/dev_give.
         default: break;
       }
     } catch (err) {
@@ -320,6 +395,7 @@ export class WorldRealmDurableObject {
     let last = Date.now();
     let acc = 0;
     let saveTimer = 0;
+    let socialPosTimer = 0;
     this.interval = setInterval(() => {
       // Last-resort net: one bad tick (a sim edge case, a broadcast error) must
       // never throw out of the timer and take the whole realm down with every
@@ -345,6 +421,12 @@ export class WorldRealmDurableObject {
         }
         this.broadcastSnapshots();
         this.routeEvents(frameEvents);
+        // Cheap (no-DB) ~1 Hz push of friends'/guildmates' live positions.
+        socialPosTimer += dt;
+        if (socialPosTimer >= 1) {
+          socialPosTimer = 0;
+          this.broadcastSocialPositions();
+        }
         saveTimer += dt;
         if (saveTimer >= 30) {
           saveTimer = 0;
@@ -368,11 +450,27 @@ export class WorldRealmDurableObject {
     if (events.length === 0) return;
     for (const conn of this.conns.values()) {
       if (conn.socket.readyState !== WebSocket.OPEN) continue;
-      const mine = events.filter((ev) => ev.pid === undefined || ev.pid === conn.pid);
+      const mine = events.filter((ev) => {
+        // ignore list: drop say-chat originating from a character this player
+        // has blocked, before it reaches their client (guild/officer chat is
+        // filtered in the service via isIgnoring). Mirrors GameServer.isBlockedSender.
+        if (ev.type === 'chat' && conn.blockedIds.size > 0 && this.isBlockedSender(conn, ev.fromPid)) return false;
+        return ev.pid === undefined || ev.pid === conn.pid;
+      });
       if (mine.length > 0) {
         try { conn.socket.send(JSON.stringify({ t: 'events', list: mine })); } catch { /* socket closing */ }
       }
     }
+  }
+
+  // True if the chat event's source pid belongs to a character the recipient has
+  // ignored. Self-echoes (fromPid === own pid) are never blocked.
+  private isBlockedSender(recipient: Conn, fromPid: number): boolean {
+    if (fromPid === recipient.pid) return false;
+    for (const c of this.conns.values()) {
+      if (c.pid === fromPid) return recipient.blockedIds.has(c.characterId);
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------
@@ -517,6 +615,11 @@ export class WorldRealmDurableObject {
     if (!this.conns.has(conn.socket)) return; // already handled
     this.conns.delete(conn.socket);
     this.sockets.delete(conn.socket);
+    // Drop from social state first so friends see them as offline in the notice.
+    this.connsByCharId.delete(conn.characterId);
+    this.social?.forget(conn.characterId);
+    void this.social?.announcePresence({ characterId: conn.characterId, name: conn.name }, false)
+      .catch((err) => console.error('presence announce failed:', err));
 
     const sim = this.sim;
     const db = this.db;
@@ -537,8 +640,12 @@ export class WorldRealmDurableObject {
         this.interval = null;
       }
       try { await this.db?.end(); } catch (err) { console.error('db close failed:', err); }
+      try { await this.socialPool?.end(); } catch (err) { console.error('social pool close failed:', err); }
       this.db = null;
       this.sim = null;
+      this.socialPool = null;
+      this.socialDb = null;
+      this.social = null;
       this.marketLoaded = false;
       this.marketRealm = null;
       try { await this.ctx.storage.deleteAlarm(); } catch { /* noop */ }
@@ -586,6 +693,148 @@ export class WorldRealmDurableObject {
   async alarm(): Promise<void> {
     if (this.sockets.size > 0) {
       await this.ctx.storage.setAlarm(Date.now() + 60_000);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Social system: transport bridge, presence, snapshots, /who. Ported from the
+  // Node GameServer's social wiring (server/game.ts).
+  // -------------------------------------------------------------------------
+
+  private actorFor(conn: Conn): SocialActor {
+    return { characterId: conn.characterId, name: conn.name };
+  }
+
+  // Case-insensitive unambiguous name lookup over live connections (mirrors
+  // GameServer.sessionByName): exact case wins; otherwise a single ci match.
+  private connByName(name: string): Conn | null {
+    const wanted = name;
+    const lower = name.toLowerCase();
+    let ci: Conn | null = null;
+    let ciCount = 0;
+    for (const c of this.connsByCharId.values()) {
+      if (c.name === wanted) return c;
+      if (c.name.toLowerCase() === lower) { ci = c; ciCount++; }
+    }
+    return ciCount === 1 ? ci : null;
+  }
+
+  // Live location + activity of an online character, for friend/guild rosters.
+  // Mirrors GameServer.presenceOf.
+  private presenceOf(conn: Conn): Presence {
+    const e = this.sim?.entities.get(conn.pid);
+    if (!e) return { zone: 'Unknown', status: 'online' };
+    let status: PresenceStatus = 'online';
+    if (e.dead) status = 'dead';
+    else if (e.dungeonId) status = 'dungeon';
+    else if (e.inCombat) status = 'combat';
+    const zone = e.dungeonId ? (DUNGEONS[e.dungeonId]?.name ?? e.dungeonId) : zoneAt(e.pos.z).name;
+    return { zone, status, x: round2(e.pos.x), z: round2(e.pos.z) };
+  }
+
+  private buildSocialTransport(): SocialTransport {
+    return {
+      byCharacterId: (id) => {
+        const c = this.connsByCharId.get(id);
+        return c ? { characterId: c.characterId, name: c.name } : null;
+      },
+      byName: (name) => {
+        const c = this.connByName(name);
+        return c ? { characterId: c.characterId, name: c.name } : null;
+      },
+      isOnline: (id) => this.connsByCharId.has(id),
+      locationOf: (id) => {
+        const c = this.connsByCharId.get(id);
+        return c ? this.presenceOf(c) : null;
+      },
+      deliver: (charId, events) => {
+        const c = this.connsByCharId.get(charId);
+        if (c && c.socket.readyState === WebSocket.OPEN) {
+          try { c.socket.send(JSON.stringify({ t: 'events', list: events })); } catch { /* socket closing */ }
+        }
+      },
+      pushSnapshot: (charId) => { void this.sendSocialSnapshot(charId); },
+      onBlocksChanged: (charId, ids) => {
+        const c = this.connsByCharId.get(charId);
+        if (c) c.blockedIds = new Set(ids);
+      },
+      isIgnoring: (recipientId, senderCharacterId) => {
+        return this.connsByCharId.get(recipientId)?.blockedIds.has(senderCharacterId) ?? false;
+      },
+    };
+  }
+
+  private async sendSocialSnapshot(charId: number): Promise<void> {
+    const conn = this.connsByCharId.get(charId);
+    const social = this.social;
+    if (!conn || !social) return;
+    try {
+      const snap = await social.snapshot(charId);
+      if (conn.socket.readyState === WebSocket.OPEN) {
+        this.sendJson(conn.socket, { t: 'social', ...snap });
+      }
+      // remember who to track for the live position push (friends + guildmates)
+      conn.socialTrackedIds = [
+        ...snap.friends.map((f) => f.id),
+        ...(snap.guild ? snap.guild.members.map((m) => m.id) : []),
+      ];
+    } catch (err) {
+      console.error('social snapshot failed:', err);
+    }
+  }
+
+  // Cheap (no-DB) periodic push: refresh the live positions of each client's
+  // already-known friends/guildmates. Mirrors GameServer.broadcastSocialPositions.
+  private broadcastSocialPositions(): void {
+    for (const conn of this.conns.values()) {
+      const ids = conn.socialTrackedIds;
+      if (!ids || ids.length === 0) continue;
+      if (conn.socket.readyState !== WebSocket.OPEN) continue;
+      const list: { id: number; x: number; z: number; zone: string; status: PresenceStatus }[] = [];
+      for (const id of ids) {
+        const other = this.connsByCharId.get(id);
+        if (!other) continue; // offline — snapshots own the online/offline flip
+        const loc = this.presenceOf(other);
+        if (loc.x === undefined || loc.z === undefined) continue;
+        list.push({ id, x: loc.x, z: loc.z, zone: loc.zone, status: loc.status });
+      }
+      if (list.length > 0) this.sendJson(conn.socket, { t: 'socialpos', list });
+    }
+  }
+
+  // /who: a roster of online players, delivered as social log events. Simplified
+  // from GameServer.sendWhoRoster (no per-viewer ignore-gating beyond the basics).
+  private sendWhoRoster(conn: Conn): void {
+    const sim = this.sim;
+    if (!sim) return;
+    const rows: { name: string; level: number; cls: string; zone: string; status: PresenceStatus }[] = [];
+    for (const c of this.connsByCharId.values()) {
+      // hide players this viewer ignores, and players who ignore the viewer
+      if (conn.blockedIds.has(c.characterId)) continue;
+      if (c.characterId !== conn.characterId && c.blockedIds.has(conn.characterId)) continue;
+      const e = sim.entities.get(c.pid);
+      const meta = sim.meta(c.pid);
+      if (!e || !meta) continue;
+      const loc = this.presenceOf(c);
+      rows.push({ name: c.name, level: e.level, cls: meta.cls, zone: loc.zone, status: loc.status });
+    }
+    rows.sort((a, b) => a.name.localeCompare(b.name));
+    const total = rows.length;
+    const list: SocialEvent[] = [{
+      type: 'log',
+      text: `Who: ${total} ${total === 1 ? 'player' : 'players'} online on ${conn.realm}.`,
+      color: '#7fd4ff',
+    }];
+    const limit = 50;
+    for (const row of rows.slice(0, limit)) {
+      const status = row.status === 'online' ? '' : ` (${row.status})`;
+      list.push({ type: 'log', text: `${row.name} - level ${row.level} ${row.cls} - ${row.zone}${status}`, color: '#c9b27a' });
+    }
+    if (total > limit) {
+      list.push({ type: 'log', text: `...and ${total - limit} more.`, color: '#998d6a' });
+    }
+    if (conn.socket.readyState === WebSocket.OPEN) {
+      this.sendJson(conn.socket, { t: 'events', list });
     }
   }
 
