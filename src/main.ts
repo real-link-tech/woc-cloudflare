@@ -1209,6 +1209,28 @@ function fatalOverlay(message: string): void {
   document.body.appendChild(el);
 }
 
+// A non-fatal "Reconnecting…" banner shown while ClientWorld retries a dropped
+// connection. Created lazily; toggled by ClientWorld.onReconnecting.
+function showReconnectingBanner(active: boolean): void {
+  let el = document.getElementById('woc-reconnecting');
+  if (active) {
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'woc-reconnecting';
+      el.textContent = 'Reconnecting…';
+      el.style.cssText =
+        'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:100000;' +
+        'background:rgba(20,16,8,0.92);color:#f0c674;border:1px solid #c9a14a;' +
+        'padding:8px 16px;border-radius:6px;font:600 14px system-ui,sans-serif;' +
+        'box-shadow:0 4px 16px rgba(0,0,0,0.5);pointer-events:none;';
+      document.body.appendChild(el);
+    }
+    el.style.display = 'block';
+  } else if (el) {
+    el.style.display = 'none';
+  }
+}
+
 async function enterWorld(c: CharacterSummary, button?: HTMLButtonElement): Promise<void> {
   try {
     if (button) {
@@ -1232,8 +1254,12 @@ async function enterWorld(c: CharacterSummary, button?: HTMLButtonElement): Prom
     fatalOverlay(err?.message ?? 'Could not authorize world entry.');
     return;
   }
-  const world = new ClientWorld(playToken, c.id, c.class, api.base);
+  // Pass a fresh-play-token minter so the client can auto-reconnect after a drop
+  // (flaky network, server redeploy, DO eviction) without the player losing the
+  // session. The DO saved the character on disconnect, so re-entry resumes state.
+  const world = new ClientWorld(playToken, c.id, c.class, api.base, () => api.playToken(c.id));
   (window as unknown as { __wocWorld?: unknown }).__wocWorld = world;
+  world.onReconnecting = (active) => showReconnectingBanner(active);
   // wait for hello + first snapshot so the world starts populated
   const waitStart = Date.now();
   const poll = setInterval(() => {

@@ -321,28 +321,37 @@ export class WorldRealmDurableObject {
     let acc = 0;
     let saveTimer = 0;
     this.interval = setInterval(() => {
-      const sim = this.sim;
-      if (!sim) return;
-      const now = Date.now();
-      let dt = (now - last) / 1000;
-      last = now;
-      if (dt > 0.5) dt = 0.5;
-      acc += dt;
-      // Capture the SimEvents each tick produces (melee swings, casts, hits,
-      // damage, loot, level-ups, …). Without forwarding these to clients the
-      // world looks frozen in combat — no attack animation, no floating damage,
-      // no spell VFX. Accumulate across all catch-up ticks, route once per frame.
-      const frameEvents: SimEvent[] = [];
-      while (acc >= DT) {
-        frameEvents.push(...sim.tick());
-        acc -= DT;
-      }
-      this.broadcastSnapshots();
-      this.routeEvents(frameEvents);
-      saveTimer += dt;
-      if (saveTimer >= 30) {
-        saveTimer = 0;
-        void this.saveAll();
+      // Last-resort net: one bad tick (a sim edge case, a broadcast error) must
+      // never throw out of the timer and take the whole realm down with every
+      // connected player. Log and keep ticking — a live world that drops one
+      // frame beats a crashed realm. Mirrors the original server's
+      // uncaughtException safety net.
+      try {
+        const sim = this.sim;
+        if (!sim) return;
+        const now = Date.now();
+        let dt = (now - last) / 1000;
+        last = now;
+        if (dt > 0.5) dt = 0.5;
+        acc += dt;
+        // Capture the SimEvents each tick produces (melee swings, casts, hits,
+        // damage, loot, level-ups, …). Without forwarding these to clients the
+        // world looks frozen in combat — no attack animation, no floating damage,
+        // no spell VFX. Accumulate across all catch-up ticks, route once per frame.
+        const frameEvents: SimEvent[] = [];
+        while (acc >= DT) {
+          frameEvents.push(...sim.tick());
+          acc -= DT;
+        }
+        this.broadcastSnapshots();
+        this.routeEvents(frameEvents);
+        saveTimer += dt;
+        if (saveTimer >= 30) {
+          saveTimer = 0;
+          void this.saveAll();
+        }
+      } catch (err) {
+        console.error('tick loop error (kept alive):', err);
       }
     }, 50) as unknown as number;
   }

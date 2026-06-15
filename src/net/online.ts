@@ -282,7 +282,7 @@ export class ClientWorld implements IWorld {
   onDisconnect: ((reason: string) => void) | null = null;
   readonly characterId: number;
 
-  private ws: WebSocket;
+  private ws!: WebSocket;
   private readonly base: string;
   private eventQueue: SimEvent[] = [];
   // inventory deltas arrive in snapshots, separate from the event frames the
@@ -291,30 +291,109 @@ export class ClientWorld implements IWorld {
   private pendingQuestCommands = new Map<string, 'accept' | 'turnin'>();
   private mouselookFacing: number | null = null;
   private sendTimer: number | undefined;
+  // Reconnect support: a fresh-play-token minter (the WS URL token is single-use
+  // at connect time, so reconnecting needs a new one) and connection lifecycle
+  // flags. WebSockets drop for many reasons out of our control — a flaky network,
+  // a server redeploy, a DO eviction — and the original WoC client had no
+  // recovery (one drop = "game over"). Auto-reconnect makes blips invisible.
+  private readonly getToken: (() => Promise<string | null>) | null;
+  private intentionalClose = false;
+  reconnecting = false;
+  onReconnecting: ((active: boolean) => void) | null = null;
+  private helloHook: (() => void) | null = null;
 
-  constructor(playToken: string, characterId: number, cls: PlayerClass, base = '') {
+  constructor(
+    playToken: string,
+    characterId: number,
+    cls: PlayerClass,
+    base = '',
+    getToken?: () => Promise<string | null>,
+  ) {
     this.characterId = characterId;
     this.base = base;
     this.cfg = { seed: 20061, playerClass: cls };
-    // The realm Durable Object authenticates from the play-token carried in the
-    // WS URL (forwarded as headers by the worker) — no legacy `auth` frame. When
-    // a realm was picked, connect to that realm's origin; otherwise the page host.
-    const origin = base
-      ? base.replace(/^http/, 'ws')
+    this.getToken = getToken ?? null;
+    const ws = this.buildSocket(playToken);
+    ws.onclose = this.liveOnClose;
+  }
+
+  // The realm Durable Object authenticates from the play-token carried in the WS
+  // URL (forwarded as headers by the worker) — no legacy `auth` frame. When a
+  // realm was picked, connect to that realm's origin; otherwise the page host.
+  private wsUrlFor(playToken: string): string {
+    const origin = this.base
+      ? this.base.replace(/^http/, 'ws')
       : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
-    const wsUrl = `${origin}/ws?token=${encodeURIComponent(playToken)}&realm=Claudemoon`;
-    this.ws = new WebSocket(wsUrl);
-    this.ws.onmessage = (ev) => this.onMessage(String(ev.data));
-    this.ws.onclose = () => {
-      this.connected = false;
-      clearInterval(this.sendTimer);
-      this.onDisconnect?.('Connection to the server was lost.');
-    };
-    // input stream at sim rate
+    return `${origin}/ws?token=${encodeURIComponent(playToken)}&realm=Claudemoon`;
+  }
+
+  // Open a socket and wire the message/error handlers + input stream. The caller
+  // sets `.onclose` (live vs reconnect-attempt). Returns the new socket.
+  private buildSocket(playToken: string): WebSocket {
+    const ws = new WebSocket(this.wsUrlFor(playToken));
+    this.ws = ws;
+    ws.onmessage = (ev) => this.onMessage(String(ev.data));
+    ws.onerror = () => { try { ws.close(); } catch { /* already closing */ } };
+    clearInterval(this.sendTimer);
     this.sendTimer = window.setInterval(() => this.sendInput(), 50);
+    return ws;
+  }
+
+  // onclose for a LIVE (post-hello) socket: a drop here kicks off reconnection.
+  private liveOnClose = (): void => {
+    this.connected = false;
+    clearInterval(this.sendTimer);
+    if (this.intentionalClose) return;
+    if (this.getToken) void this.reconnectLoop();
+    else this.onDisconnect?.('Connection to the server was lost.');
+  };
+
+  // Retry with bounded exponential backoff + jitter until a fresh socket reaches
+  // the world (server `hello`), or attempts run out. Each attempt mints a new
+  // play-token. The DO saved the character on the previous disconnect, so
+  // re-entry reloads current state.
+  private async reconnectLoop(): Promise<void> {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    this.onReconnecting?.(true);
+    for (let attempt = 1; attempt <= 12 && !this.intentionalClose; attempt++) {
+      const backoff = Math.min(8000, 400 * 2 ** attempt) + Math.floor(Math.random() * 400);
+      await new Promise((r) => setTimeout(r, backoff));
+      if (this.intentionalClose) break;
+      let token: string | null = null;
+      try { token = await this.getToken!(); } catch { token = null; }
+      if (!token) continue;
+      if (await this.attemptReconnect(token)) {
+        this.reconnecting = false;
+        this.onReconnecting?.(false);
+        return;
+      }
+    }
+    this.reconnecting = false;
+    this.onReconnecting?.(false);
+    if (!this.intentionalClose) this.onDisconnect?.('Connection lost. Please re-enter the world.');
+  }
+
+  // One reconnect attempt: open a socket, resolve true on `hello` (and promote it
+  // to the live socket) or false on close/timeout so the loop can retry.
+  private attemptReconnect(playToken: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const ws = this.buildSocket(playToken);
+      let done = false;
+      const finish = (ok: boolean): void => {
+        if (done) return;
+        done = true;
+        this.helloHook = null;
+        resolve(ok);
+      };
+      this.helloHook = () => { ws.onclose = this.liveOnClose; finish(true); };
+      ws.onclose = () => { this.connected = false; clearInterval(this.sendTimer); finish(false); };
+      window.setTimeout(() => finish(false), 12000);
+    });
   }
 
   close(): void {
+    this.intentionalClose = true;
     clearInterval(this.sendTimer);
     this.ws.onclose = null;
     this.ws.close();
@@ -380,6 +459,9 @@ export class ClientWorld implements IWorld {
       this.cfg.seed = msg.seed;
       if (typeof msg.realm === 'string') this.realm = msg.realm;
       this.connected = true;
+      // Signal a successful (re)connect so a pending reconnect attempt resolves
+      // and promotes this socket to the live connection.
+      this.helloHook?.();
       return;
     }
     if (msg.t === 'error') {
