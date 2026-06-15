@@ -59,3 +59,7 @@ app.all('*', async (c) => {
 });
 
 export default app;
+
+// Cloudflare requires the Durable Object class to be a named export of the
+// worker entry module so the runtime can instantiate it.
+export { WorldRealmDurableObject } from './realm-do';

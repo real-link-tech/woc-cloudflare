@@ -8,6 +8,9 @@
     "CLERK_PUBLISHABLE_KEY": "pk_test_cmVuZXdpbmctbW9uYXJjaC01LmNsZXJrLmFjY291bnRzLmRldiQ",
     "CLERK_JWT_ISSUER": "https://renewing-monarch-5.clerk.accounts.dev"
   },
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "8e812d1431b04f4481490f0d265870f1" }],
+  "durable_objects": { "bindings": [{ "name": "WORLD_REALMS", "class_name": "WorldRealmDurableObject" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldRealmDurableObject"] }],
   "env": {
     "dev": {
       "name": "woc-cloudflare-dev",
@@ -15,7 +18,9 @@
       "vars": {
         "CLERK_PUBLISHABLE_KEY": "pk_test_cmVuZXdpbmctbW9uYXJjaC01LmNsZXJrLmFjY291bnRzLmRldiQ",
         "CLERK_JWT_ISSUER": "https://renewing-monarch-5.clerk.accounts.dev"
-      }
+      },
+      "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "8e812d1431b04f4481490f0d265870f1" }],
+      "durable_objects": { "bindings": [{ "name": "WORLD_REALMS", "class_name": "WorldRealmDurableObject" }] }
     }
   }
 }
