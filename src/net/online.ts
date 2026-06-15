@@ -17,6 +17,14 @@ import type { ArenaInfo, CharacterSearchResult, DuelInfo, FriendInfo, IWorld, Le
 // REST
 // ---------------------------------------------------------------------------
 
+// The Clerk gate (src/ui/clerk-gate.ts) stashes a fresh-token getter here at
+// boot so the network layer can attach the shared IPIO Clerk JWT to requests.
+declare global {
+  interface Window {
+    __wocClerkToken?: () => Promise<string | null>;
+  }
+}
+
 export interface CharacterSummary {
   id: number;
   name: string;
@@ -86,12 +94,19 @@ export class Api {
     }
   }
 
+  // Auth is the shared IPIO Clerk session: pull a fresh JWT from the gate's
+  // stashed getter and send it as the bearer token when present.
+  private async authHeader(): Promise<Record<string, string>> {
+    const token = await window.__wocClerkToken?.();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
   private async post(path: string, body: unknown): Promise<any> {
     const res = await fetch(this.base + path, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        ...(await this.authHeader()),
       },
       body: JSON.stringify(body),
     });
@@ -102,7 +117,7 @@ export class Api {
 
   private async get(path: string): Promise<any> {
     const res = await fetch(this.base + path, {
-      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+      headers: await this.authHeader(),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error ?? `request failed (${res.status})`);
@@ -114,7 +129,7 @@ export class Api {
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        ...(await this.authHeader()),
       },
       body: JSON.stringify(body),
     });
@@ -151,6 +166,13 @@ export class Api {
 
   async deleteCharacter(characterId: number, name: string): Promise<void> {
     await this.delete(`/api/characters/${characterId}`, { name });
+  }
+
+  // Mint a short-lived play token (scoped to a character) for the realtime
+  // session. The worker derives it from the verified Clerk JWT.
+  async playToken(characterId: number): Promise<string> {
+    const data = await this.post('/api/woc/play-token', { character: characterId });
+    return data.token as string;
   }
 
   async reportPlayer(reporterCharacterId: number, targetPid: number, reason: string, details: string): Promise<void> {

@@ -25,6 +25,7 @@
     "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit"
   },
   "dependencies": {
+    "@clerk/clerk-js": "^5.125.13",
     "hono": "^4.6.0",
     "jose": "^5.10.0",
     "n8ao": "^1.10.1",

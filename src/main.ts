@@ -20,6 +20,7 @@ import { CLASSES, ABILITIES } from './sim/content/classes';
 import { iconDataUrl } from './ui/icons';
 import { hydrateIcons } from './ui/ui_icons';
 import { getLanguage, setLanguage, t, SupportedLanguage } from './ui/i18n';
+import { requireClerkSession } from './ui/clerk-gate';
 
 
 const WORLD_SEED = 20061; // fixed: World of Claudecraft is a persistent place
@@ -2273,4 +2274,12 @@ function wireStartScreens(): void {
   });
 }
 
-wireStartScreens();
+// Boot is gated behind a Clerk session (shared IPIO login). The gate blocks
+// here until the user is signed in (redirecting to Clerk's hosted sign-in
+// otherwise), then stashes the fresh-token getter so the network layer can
+// attach the Clerk JWT to every request before the game UI wires up.
+void (async () => {
+  const session = await requireClerkSession(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string);
+  window.__wocClerkToken = session.getToken;
+  wireStartScreens();
+})();
