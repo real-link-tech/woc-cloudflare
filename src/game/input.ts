@@ -16,7 +16,7 @@ const TOUCH_LOOK_PITCH_RATE = 2.2;
 export interface InputCallbacks {
   onTab(): void;
   onAbility(slot: number): void;
-  onUiKey(key: 'interact' | 'bags' | 'char' | 'spellbook' | 'talents' | 'questlog' | 'map' | 'nameplates' | 'escape' | 'chat' | 'meters' | 'social' | 'arena' | 'leaderboard'): void;
+  onUiKey(key: 'interact' | 'bags' | 'char' | 'spellbook' | 'talents' | 'questlog' | 'map' | 'nameplates' | 'escape' | 'chat' | 'meters' | 'social' | 'arena' | 'leaderboard' | 'build'): void;
   onClickPick(x: number, y: number, button: number): void;
   /** When false, edge actions (spells, UI keys) are ignored. */
   canUseGameKeys?: () => boolean;
@@ -235,6 +235,7 @@ export class Input {
       case 'social': this.cb.onUiKey('social'); return;
       case 'arena': this.cb.onUiKey('arena'); return;
       case 'leaderboard': this.cb.onUiKey('leaderboard'); return;
+      case 'build': this.cb.onUiKey('build'); return;
       case 'chat': this.cb.onUiKey('chat'); return;
     }
   }

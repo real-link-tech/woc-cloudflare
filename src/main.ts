@@ -4,7 +4,8 @@ import { Input } from './game/input';
 import { Keybinds } from './game/keybinds';
 import { Settings, GameSettings, SETTING_RANGES } from './game/settings';
 import { MobileControls, PHONE_TOUCH_QUERY, isPhoneTouchDevice } from './game/mobile_controls';
-import { Hud } from './ui/hud';
+import { Hud, type BuildAsset } from './ui/hud';
+import { WorldObjectsLayer } from './render/world_objects';
 import { audio } from './game/audio';
 import { music } from './game/music';
 import { handlePickedEntity, hoverCursorKind } from './game/interactions';
@@ -407,9 +408,11 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
         case 'social': hud.toggleSocial(); break;
         case 'arena': hud.toggleArena(); break;
         case 'leaderboard': hud.toggleLeaderboard(); break;
-        case 'chat': openChat(); break;
+        case 'build': hud.toggleBuildPalette(); break;
         case 'escape':
-          // close the topmost panel; if nothing was open, open the game menu
+          // build mode swallows Esc first (stop placing); then close panels;
+          // finally open the game menu if nothing else was open.
+          if (buildMode) { setBuildMode(null); break; }
           if (!hud.closeAll()) hud.toggleOptionsMenu();
           break;
       }
@@ -473,6 +476,31 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // "Build the world": render placed objects + an in-game build mode. Both are
+  // online-only (the server owns the placed set); offline runs without them.
+  // ---------------------------------------------------------------------------
+  const worldObjects = online ? new WorldObjectsLayer(renderer.scene, world.cfg.seed) : null;
+  if (online && worldObjects) {
+    // render whatever the server already mirrored on connect
+    worldObjects.reconcile(online);
+  }
+  // Build mode: the asset selected in the palette, ready to drop on click.
+  let buildMode: BuildAsset | null = null;
+  function setBuildMode(asset: BuildAsset | null): void {
+    buildMode = asset;
+    document.body.classList.toggle('building', asset !== null);
+    const hint = document.getElementById('build-hint');
+    if (hint) {
+      hint.textContent = asset
+        ? `Placing “${asset.name}” — click the ground to place, Esc / right-click to stop.`
+        : '';
+    }
+  }
+  if (online) {
+    hud.onBuildAssetSelected = (asset) => setBuildMode(asset);
+  }
+
   function interactKey(): void {
     const p = world.player;
     let bestCorpse: number | null = null, bestCorpseD = INTERACT_RANGE;
@@ -511,6 +539,28 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
 
   function handlePick(x: number, y: number, button: number): void {
+    // Build mode intercepts clicks: place/delete world objects instead of the
+    // normal target/move handling. Right-click (button 2) exits build mode.
+    if (buildMode && online && worldObjects) {
+      if (button !== 0) { setBuildMode(null); return; }
+      // delete: a left-click directly on a placed object removes it
+      const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
+      if (hitId) { online.removeWorldObject(hitId); return; }
+      // place: drop the selected asset where the click meets the ground
+      const g = renderer.groundPoint(x, y, world.player.pos.y);
+      if (g) {
+        online.placeWorldObject({
+          ipAssetId: buildMode.ipAssetId,
+          glbUrl: buildMode.glbUrl,
+          name: buildMode.name,
+          x: g.x,
+          z: g.z,
+          rot: 0,
+          scale: 1,
+        });
+      }
+      return;
+    }
     const id = renderer.pick(x, y);
     const clickToMove = settings.get('clickToMove') > 0 && !world.player.dead;
     if (id === null) {
@@ -677,6 +727,8 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     renderer.camPitch = input.camPitch;
     renderer.camDist = input.camDist;
     renderer.sync(alpha, frameDt, movementFacing);
+    // (re)load GLBs for placed world objects only when the mirrored set changed
+    if (worldObjects && net.consumeWorldObjectsChanged()) worldObjects.reconcile(net);
     hud.update();
   }
   requestAnimationFrame(frame);
@@ -691,7 +743,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     face(facing: unknown) { input.setControllerFacing(facing); },
     stop() { input.clearControllerMoveInput(); },
   };
-  (window as any).__game = { sim: world, world, renderer, input, hud, online, controller };
+  (window as any).__game = { sim: world, world, renderer, input, hud, online, controller, worldObjects, setBuildMode };
 }
 
 // ---------------------------------------------------------------------------

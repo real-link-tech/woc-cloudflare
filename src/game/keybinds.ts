@@ -50,6 +50,7 @@ export const BIND_ACTIONS: BindAction[] = [
   { id: 'social', label: 'Friends & Guild', category: 'Interface', kind: 'edge', defaults: ['KeyO'] },
   { id: 'arena', label: 'Arena (Ashen Coliseum)', category: 'Interface', kind: 'edge', defaults: ['KeyG'] },
   { id: 'leaderboard', label: 'Leaderboard', category: 'Interface', kind: 'edge', defaults: ['KeyK'] },
+  { id: 'build', label: 'Build Palette', category: 'Interface', kind: 'edge', defaults: ['KeyJ'] },
   { id: 'chat', label: 'Open Chat', category: 'Interface', kind: 'edge', defaults: ['Enter', 'NumpadEnter'] },
   // Action bar (slot 0 = Attack)
   ...SLOT_DEFAULTS.map((code, i): BindAction => ({

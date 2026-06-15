@@ -734,6 +734,28 @@
   .bag-item:hover { background: #ffffff12; }
   .bag-item .bi-count { margin-left: auto; color: #ccc; }
   .money { margin-top: 8px; font-size: 12px; color: var(--gold); text-align: right; }
+  /* Build palette — search the IPIO asset library + place assets in the world */
+  #build-panel { width: 372px; }
+  .build-search { display: flex; gap: 6px; margin-bottom: 8px; }
+  .build-search input { flex: 1; background: #1a1410; border: 1px solid #463a1c; border-radius: 4px;
+    color: #e8d8a8; font-size: 12.5px; padding: 6px 8px; font-family: var(--font-serif); }
+  .build-search input:focus { outline: none; border-color: var(--gold-dim); }
+  .build-status { font-size: 12px; color: #998d6a; padding: 4px 2px; min-height: 16px; }
+  .build-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .build-item { display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer;
+    border: 1px solid #463a1c; border-radius: 5px; padding: 6px 4px; background: #1a1410aa;
+    transition: border-color var(--transition-speed), background var(--transition-speed); }
+  .build-item:hover { border-color: var(--gold-dim); background: #2a2014; }
+  .build-item .bi-thumb { width: 64px; height: 64px; object-fit: contain; border-radius: 4px; background: #0006; }
+  .build-item .bi-title { font-size: 10.5px; color: #cfc6a8; text-align: center; line-height: 1.2;
+    max-width: 76px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* On-screen hint shown while build mode is active */
+  #build-hint { position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+    display: none; z-index: 30; pointer-events: none; padding: 6px 14px; border-radius: 6px;
+    background: #1a1410dd; border: 1px solid var(--gold-dim); color: var(--gold);
+    font-family: var(--title-font); font-size: 13px; text-shadow: 1px 1px 2px #000;
+    box-shadow: 0 2px 12px #000a; }
+  body.building #build-hint { display: block; }
   .coin { display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: -1px; margin-left: 6px; margin-right: 2px; }
   .coin.g { background: radial-gradient(circle at 35% 30%, #ffe98a, #b8860b); }
   .coin.s { background: radial-gradient(circle at 35% 30%, #e8e8e8, #888); }
@@ -3654,6 +3676,7 @@
     </div>
     <div id="arena-window" class="window panel"></div>
     <div id="leaderboard-window" class="window panel"></div>
+    <div id="build-panel" class="window panel"></div>
     <div id="market-window" class="window panel"></div>
     <div id="arena-status"></div>
     <div id="options-menu" class="window panel"></div>
@@ -3668,12 +3691,14 @@
       <button class="micro-btn" id="mm-bag" aria-label="Bags" data-icon="bags"><span class="keybind">b</span></button>
       <button class="micro-btn" id="mm-arena" aria-label="Arena" data-icon="arena"><span class="keybind">g</span></button>
       <button class="micro-btn" id="mm-leaderboard" aria-label="Leaderboard" data-icon="leaderboard"><span class="keybind">k</span></button>
+      <button class="micro-btn" id="mm-build" aria-label="Build" data-icon="build"><span class="keybind">j</span></button>
       <button class="micro-btn" id="mm-music" aria-label="Music" data-icon="music"></button>
       <button class="micro-btn" id="mm-social" aria-label="Friends" data-icon="social"><span class="keybind">o</span></button>
       <button class="micro-btn" id="mm-options" aria-label="Settings" data-icon="menu"><span class="keybind">esc</span></button>
     </div>
     <div id="tooltip" class="panel"></div>
 
+    <div id="build-hint"></div>
     <div id="error-msg"></div>
     <div id="banner"></div>
 

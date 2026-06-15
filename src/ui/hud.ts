@@ -98,6 +98,79 @@ const MAP_BG_RES = 480;
 const MAP_MAX_ZOOM = 6;
 const MAP_DETAIL_ZOOM = 2.2; // at/above this zoom, overlay buildings + vegetation
 
+// ---------------------------------------------------------------------------
+// Build palette — IPIO asset library search
+// ---------------------------------------------------------------------------
+
+// A placeable asset resolved from the IPIO asset-library search results.
+export interface BuildAsset {
+  ipAssetId: string;
+  glbUrl: string;
+  name: string;
+  thumbUrl: string | null;
+}
+
+// The IPIO asset library search endpoint (dev). CORS is `*`; the public Kenney
+// library needs no auth. We fetch GLB-bearing models so they can be placed.
+const IPIO_ASSET_SEARCH = 'https://api-dev.ipio.ai/api/v1/ip-assets/';
+
+// Only GLBs served from an IPIO host are accepted by the server (it rejects
+// foreign URLs), so filter the same way client-side to avoid doomed placements.
+const IPIO_HOSTS = new Set(['assets.ipio.ai', 'api.ipio.ai', 'api-dev.ipio.ai']);
+function isIpioHost(url: string): boolean {
+  try {
+    return IPIO_HOSTS.has(new URL(url).host);
+  } catch {
+    return false;
+  }
+}
+
+// Pull a model (GLB) url + a thumbnail out of a raw asset-library item. Returns
+// null when no IPIO-hosted GLB is resolvable (the item can't be placed).
+function resolveBuildAsset(item: any): BuildAsset | null {
+  if (!item || typeof item !== 'object') return null;
+  const renditions: any[] = Array.isArray(item.renditions) ? item.renditions : [];
+
+  // 1) a rendition that is itself a GLB (by content type or engine-manifest role)
+  let glbUrl: string | null = null;
+  for (const r of renditions) {
+    const ct = r?.contentType ?? r?.content_type;
+    if (ct === 'model/gltf-binary' || r?.role === 'engine-manifest') {
+      const u = r?.url ?? r?.externalUrl ?? r?.external_url;
+      if (typeof u === 'string') { glbUrl = u; break; }
+    }
+  }
+  // 2) otherwise a model file declared in a rendition's metadata.files[]
+  if (!glbUrl) {
+    for (const r of renditions) {
+      const files: any[] = Array.isArray(r?.metadata?.files) ? r.metadata.files : [];
+      for (const f of files) {
+        const fct = f?.contentType ?? f?.content_type;
+        if (f?.role === 'model' || fct === 'model/gltf-binary') {
+          const u = f?.url ?? f?.externalUrl ?? f?.external_url;
+          if (typeof u === 'string') { glbUrl = u; break; }
+        }
+      }
+      if (glbUrl) break;
+    }
+  }
+  if (!glbUrl || !isIpioHost(glbUrl)) return null;
+
+  // thumbnail: a thumbnail rendition, else the item's own thumbnailUrl, else none
+  let thumbUrl: string | null = null;
+  for (const r of renditions) {
+    if (r?.role === 'thumbnail') {
+      const u = r?.url ?? r?.externalUrl ?? r?.external_url ?? item.thumbnailUrl;
+      if (typeof u === 'string') { thumbUrl = u; break; }
+    }
+  }
+  if (!thumbUrl && typeof item.thumbnailUrl === 'string') thumbUrl = item.thumbnailUrl;
+
+  const ipAssetId = String(item.id ?? item.ipAssetId ?? item.assetId ?? glbUrl);
+  const name = String(item.name ?? item.title ?? item.displayName ?? 'Asset');
+  return { ipAssetId, glbUrl, name, thumbUrl };
+}
+
 export class Hud {
   private static readonly BAR_ABILITY_SLOTS = 11; // bar slots 1..11; slot 0 is the fixed Attack toggle
   private abilityButtons: { btn: HTMLButtonElement; label: HTMLSpanElement; countEl: HTMLSpanElement; keybindEl: HTMLSpanElement; cdOverlay: HTMLDivElement; cdText: HTMLDivElement; lastIcon: string }[] = [];
@@ -138,6 +211,11 @@ export class Hud {
   private marketTab: 'browse' | 'sell' | 'collect' = 'browse';
   private marketSellItem: string | null = null; // bag item staged for listing
   private lastMarketSig = '';
+  // Build palette ("build the world"): IPIO asset search + place. The select
+  // callback is wired by main.ts to enter build mode; null while offline.
+  onBuildAssetSelected: ((asset: BuildAsset) => void) | null = null;
+  private buildSearchTimer: number | undefined;
+  private buildSearchSeq = 0; // guards out-of-order async search responses
   // all-time ladder, fetched best-effort from the server (online only)
   private arenaAllTime: { name: string; class: string; level: number; rating: number; wins: number; losses: number }[] | null = null;
   private arenaLbFetchedAt = 0;
@@ -243,6 +321,7 @@ export class Hud {
     $('#mm-options')?.addEventListener('click', () => this.toggleOptionsMenu());
     $('#mm-arena').addEventListener('click', () => this.toggleArena());
     $('#mm-leaderboard').addEventListener('click', () => this.toggleLeaderboard());
+    $('#mm-build')?.addEventListener('click', () => this.toggleBuildPalette());
     const musicBtn = $('#mm-music');
     const styleMusicBtn = () => {
       // keep the note clearly readable when off (a plain tan, not gold) — the
@@ -2316,6 +2395,98 @@ export class Hud {
     el.querySelector('[data-close]')?.addEventListener('click', () => { el.style.display = 'none'; this.hideTooltip(); });
   }
 
+  // -------------------------------------------------------------------------
+  // Build palette ("build the world"): search the IPIO asset library and pick
+  // an asset to place. Selecting a tile hands off to main.ts's build mode.
+  // -------------------------------------------------------------------------
+
+  toggleBuildPalette(): void {
+    const el = $('#build-panel');
+    if (el.style.display === 'block') { el.style.display = 'none'; this.hideTooltip(); audio.bagClose(); return; }
+    this.closeOtherWindows('#build-panel');
+    this.renderBuildPalette();
+    el.style.display = 'block';
+    audio.bagOpen();
+    // default listing (empty query → first kenney assets) + focus the field
+    const input = el.querySelector<HTMLInputElement>('.build-search input');
+    input?.focus();
+    void this.runBuildSearch('');
+  }
+
+  renderBuildPalette(): void {
+    const el = $('#build-panel');
+    el.innerHTML = `<div class="panel-title"><span>Build${this.onBuildAssetSelected ? '' : ' <span style="color:#998d6a;font-size:11px">— online only</span>'}</span><span class="x-btn" data-close>${svgIcon('close')}</span></div>`
+      + `<div class="build-search"><input type="text" placeholder="Search the asset library…" maxlength="64" /></div>`
+      + `<div class="build-status"></div>`
+      + `<div class="build-grid"></div>`;
+    const input = el.querySelector<HTMLInputElement>('.build-search input')!;
+    input.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();
+      if (ev.key === 'Enter') {
+        window.clearTimeout(this.buildSearchTimer);
+        void this.runBuildSearch(input.value.trim());
+      } else if (ev.key === 'Escape') {
+        el.style.display = 'none';
+      }
+    });
+    // debounced live search as the player types
+    input.addEventListener('input', () => {
+      window.clearTimeout(this.buildSearchTimer);
+      const q = input.value.trim();
+      this.buildSearchTimer = window.setTimeout(() => void this.runBuildSearch(q), 350);
+    });
+    el.querySelector('[data-close]')?.addEventListener('click', () => { el.style.display = 'none'; this.hideTooltip(); });
+  }
+
+  private async runBuildSearch(query: string): Promise<void> {
+    const el = $('#build-panel');
+    if (el.style.display !== 'block') return;
+    const status = el.querySelector<HTMLElement>('.build-status');
+    const grid = el.querySelector<HTMLElement>('.build-grid');
+    if (!status || !grid) return;
+    const seq = ++this.buildSearchSeq;
+    status.textContent = 'Searching…';
+    let items: any[] = [];
+    try {
+      const url = `${IPIO_ASSET_SEARCH}?source=kenney&includePublicLibrary=true&limit=24&query=${encodeURIComponent(query)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`search failed (${res.status})`);
+      const json = await res.json();
+      items = Array.isArray(json?.data?.items) ? json.data.items
+        : Array.isArray(json?.items) ? json.items
+        : [];
+    } catch (err) {
+      if (seq !== this.buildSearchSeq) return;
+      status.textContent = 'Asset search failed. Try again.';
+      grid.innerHTML = '';
+      console.warn('[build] asset search failed', err);
+      return;
+    }
+    if (seq !== this.buildSearchSeq) return; // a newer search superseded this one
+    const assets = items.map(resolveBuildAsset).filter((a): a is BuildAsset => a !== null);
+    grid.innerHTML = '';
+    if (assets.length === 0) {
+      status.textContent = query ? `No placeable assets for “${query}”.` : 'No placeable assets found.';
+      return;
+    }
+    status.textContent = `${assets.length} asset${assets.length === 1 ? '' : 's'} — click to place.`;
+    for (const asset of assets) {
+      const tile = document.createElement('div');
+      tile.className = 'build-item';
+      const thumb = asset.thumbUrl
+        ? `<img class="bi-thumb" src="${esc(asset.thumbUrl)}" alt="" loading="lazy" />`
+        : `<div class="bi-thumb"></div>`;
+      tile.innerHTML = `${thumb}<span class="bi-title" title="${esc(asset.name)}">${esc(asset.name)}</span>`;
+      tile.addEventListener('click', () => {
+        if (!this.onBuildAssetSelected) { this.showError('Building is only available in the online world.'); return; }
+        audio.click();
+        this.onBuildAssetSelected(asset);
+        // keep the palette open so several assets can be queued in a row
+      });
+      grid.appendChild(tile);
+    }
+  }
+
   private sellBagItem(slot: InvSlot, ev: MouseEvent): void {
     const count = Math.max(1, Math.floor(slot.count));
     if (ev.ctrlKey || ev.metaKey) {
@@ -4221,7 +4392,7 @@ export class Hud {
   // The mutually-exclusive modal windows. They all share one centred position
   // (see the `.window` rule), so only one may be visible at a time — the vendor
   // is the lone pairing (it opens bags alongside, laid out side-by-side).
-  private static readonly MODAL_IDS = ['#quest-dialog', '#loot-window', '#vendor-window', '#bags', '#char-window', '#spellbook', '#talents-window', '#quest-log-window', '#map-window', '#report-window', '#arena-window', '#leaderboard-window'];
+  private static readonly MODAL_IDS = ['#quest-dialog', '#loot-window', '#vendor-window', '#bags', '#char-window', '#spellbook', '#talents-window', '#quest-log-window', '#map-window', '#report-window', '#arena-window', '#leaderboard-window', '#build-panel'];
 
   // Opening any window closes the others first, so panels never stack. `keep`
   // is the window (or windows, e.g. vendor+bags) being opened.
