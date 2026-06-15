@@ -1079,7 +1079,18 @@ async function refreshCharacters(): Promise<void> {
   const listEl = $('#char-list');
   listEl.innerHTML = '<li class="char-list-message">Loading…</li>';
   try {
-    const chars = await api.characters();
+    let chars = await api.characters();
+    // A freshly-signed-in user with no character still needs to reach the world:
+    // seed a default Hero (warrior) and re-list so the rest of the flow (Enter
+    // World → play-token → WS) has a character to enter with.
+    if (chars.length === 0) {
+      try {
+        await api.createCharacter('Hero', 'warrior');
+        chars = await api.characters();
+      } catch {
+        // fall through with the empty list; the create-below UI still works
+      }
+    }
     if (api.realm) $('#charselect-realm').textContent = `Realm: ${api.realm}`;
     listEl.innerHTML = '';
     if (chars.length === 0) {
@@ -1192,7 +1203,14 @@ async function enterWorld(c: CharacterSummary, button?: HTMLButtonElement): Prom
       button.textContent = 'Enter World';
     }
   }
-  const world = new ClientWorld(api.token!, c.id, c.class, api.base);
+  let playToken: string;
+  try {
+    playToken = await api.playToken(c.id);
+  } catch (err: any) {
+    fatalOverlay(err?.message ?? 'Could not authorize world entry.');
+    return;
+  }
+  const world = new ClientWorld(playToken, c.id, c.class, api.base);
   // wait for hello + first snapshot so the world starts populated
   const waitStart = Date.now();
   const poll = setInterval(() => {

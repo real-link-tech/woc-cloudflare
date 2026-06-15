@@ -288,7 +288,6 @@ export class ClientWorld implements IWorld {
   readonly characterId: number;
 
   private ws: WebSocket;
-  private readonly token: string;
   private readonly base: string;
   private eventQueue: SimEvent[] = [];
   // inventory deltas arrive in snapshots, separate from the event frames the
@@ -298,20 +297,18 @@ export class ClientWorld implements IWorld {
   private mouselookFacing: number | null = null;
   private sendTimer: number | undefined;
 
-  constructor(token: string, characterId: number, cls: PlayerClass, base = '') {
+  constructor(playToken: string, characterId: number, cls: PlayerClass, base = '') {
     this.characterId = characterId;
-    this.token = token;
     this.base = base;
     this.cfg = { seed: 20061, playerClass: cls };
-    // when a realm was picked, connect to that realm's origin; otherwise the
-    // page's own host
-    const wsUrl = base
-      ? base.replace(/^http/, 'ws') + '/ws'
-      : buildWebSocketUrl(location.protocol, location.host);
+    // The realm Durable Object authenticates from the play-token carried in the
+    // WS URL (forwarded as headers by the worker) — no legacy `auth` frame. When
+    // a realm was picked, connect to that realm's origin; otherwise the page host.
+    const origin = base
+      ? base.replace(/^http/, 'ws')
+      : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+    const wsUrl = `${origin}/ws?token=${encodeURIComponent(playToken)}&realm=Claudemoon`;
     this.ws = new WebSocket(wsUrl);
-    this.ws.onopen = () => {
-      this.ws.send(JSON.stringify(buildWebSocketAuthMessage(token, characterId)));
-    };
     this.ws.onmessage = (ev) => this.onMessage(String(ev.data));
     this.ws.onclose = () => {
       this.connected = false;
@@ -788,7 +785,12 @@ export class ClientWorld implements IWorld {
     const q = query.trim();
     if (!q) return [];
     try {
-      const res = await fetch(`${this.base}/api/search?q=${encodeURIComponent(q)}`, { headers: { Authorization: `Bearer ${this.token}` } });
+      // REST auth rides the shared IPIO Clerk session (same getter the Api
+      // class uses); the WS itself is authed by its URL play-token, so this
+      // class no longer keeps a long-lived bearer token of its own.
+      const clerkToken = await window.__wocClerkToken?.();
+      const headers: Record<string, string> = clerkToken ? { Authorization: `Bearer ${clerkToken}` } : {};
+      const res = await fetch(`${this.base}/api/search?q=${encodeURIComponent(q)}`, { headers });
       if (!res.ok) return [];
       return (await res.json()).results ?? [];
     } catch {
