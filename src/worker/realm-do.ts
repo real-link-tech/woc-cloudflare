@@ -9,7 +9,6 @@
 // players see the movement. Combat/quests come "for free" because the Sim
 // computes them internally; the DO only feeds input and serializes snapshots.
 // Chat/party/trade/duel/social/market/quest/loadout commands are deferred to M2.
-import { Pool } from 'pg';
 import { Sim, type CharacterState } from '../sim/sim';
 import type { Entity, PlayerClass, SimEvent } from '../sim/types';
 import { DT } from '../sim/types';
@@ -58,11 +57,10 @@ export class WorldRealmDurableObject {
   private db: WocDb | null = null;
   private interval: number | null = null;
 
-  // Social system (friends/ignore/guilds/presence). PgSocialDb needs a raw pg
-  // Pool, so the DO owns one pool (created lazily on first connect, max 5,
-  // alongside WocDb's own pool) and tears it down on drain. SocialService is the
-  // pure engine wired to that DB + a transport bridging to live DO state.
-  private socialPool: Pool | null = null;
+  // Social system (friends/ignore/guilds/presence). PgSocialDb opens a fresh
+  // per-operation Hyperdrive Client from the connection string (no long-lived
+  // pool), created lazily on first connect. SocialService is the pure engine
+  // wired to that DB + a transport bridging to live DO state.
   private socialDb: PgSocialDb | null = null;
   private social: SocialService | null = null;
 
@@ -110,8 +108,7 @@ export class WorldRealmDurableObject {
       this.db = createWocDb(this.env.HYPERDRIVE.connectionString);
     }
     if (!this.social) {
-      this.socialPool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, max: 5 });
-      this.socialDb = new PgSocialDb(this.socialPool, realm);
+      this.socialDb = new PgSocialDb(this.env.HYPERDRIVE.connectionString, realm);
       this.social = new SocialService(this.socialDb, this.buildSocialTransport());
     }
     const sim = this.sim;
@@ -632,18 +629,17 @@ export class WorldRealmDurableObject {
     }
 
     if (this.sockets.size === 0) {
-      // Drain to nothing: persist everything, stop the loop, drop the pool, and
-      // forget the sim so the next connection re-inits a fresh authoritative world.
+      // Drain to nothing: persist everything, stop the loop, and forget the sim
+      // so the next connection re-inits a fresh authoritative world. There is no
+      // pool to drop — each DB op opens and closes its own Hyperdrive Client.
       await this.saveAll();
       if (this.interval) {
         clearInterval(this.interval);
         this.interval = null;
       }
       try { await this.db?.end(); } catch (err) { console.error('db close failed:', err); }
-      try { await this.socialPool?.end(); } catch (err) { console.error('social pool close failed:', err); }
       this.db = null;
       this.sim = null;
-      this.socialPool = null;
       this.socialDb = null;
       this.social = null;
       this.marketLoaded = false;
