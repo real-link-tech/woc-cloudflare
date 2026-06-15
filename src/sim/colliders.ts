@@ -116,11 +116,9 @@ function colliderBounds(c: Collider): { minX: number; maxX: number; minZ: number
   return { minX: c.x - ext, maxX: c.x + ext, minZ: c.z - ext, maxZ: c.z + ext };
 }
 
-function gridFor(seed: number): ColliderGrid {
-  let grid = gridCache.get(seed);
-  if (grid) return grid;
-  grid = { cells: new Map() };
-  for (const c of staticWorldColliders(seed)) {
+function buildGrid(colliders: Collider[]): ColliderGrid {
+  const grid: ColliderGrid = { cells: new Map() };
+  for (const c of colliders) {
     const b = colliderBounds(c);
     const x0 = Math.floor((b.minX - MAX_BODY_RADIUS) / GRID_CELL);
     const x1 = Math.floor((b.maxX + MAX_BODY_RADIUS) / GRID_CELL);
@@ -135,8 +133,42 @@ function gridFor(seed: number): ColliderGrid {
       }
     }
   }
+  return grid;
+}
+
+function gridFor(seed: number): ColliderGrid {
+  let grid = gridCache.get(seed);
+  if (grid) return grid;
+  grid = buildGrid(staticWorldColliders(seed));
   gridCache.set(seed, grid);
   return grid;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic (player-placed) colliders
+// ---------------------------------------------------------------------------
+// Build-mode world objects collide too, so a barn you place actually blocks
+// movement (and mob pathfinding via isBlocked). Unlike the static set these
+// change at runtime, so they live in a separate grid the realm rebuilds via
+// setDynamicColliders() whenever its build changes. Keyed by seed to mirror the
+// static cache; in practice one realm DO == one seed.
+const dynamicGridCache = new Map<number, ColliderGrid>();
+
+// Replace the dynamic collider set for a realm. Pass an empty array to clear.
+export function setDynamicColliders(seed: number, colliders: Collider[]): void {
+  if (colliders.length === 0) dynamicGridCache.delete(seed);
+  else dynamicGridCache.set(seed, buildGrid(colliders));
+}
+
+// Approximate ground footprint of a placed asset: we don't store per-model
+// bounds, so a circle of this base radius scaled by the placement scale stands
+// in. Tune here if placed props feel too "fat" or too "thin" to walk around.
+export const WORLD_OBJECT_BASE_RADIUS = 0.5;
+
+// A circle collider for one placed world object (sim-layer shape — the caller
+// passes the minimal {x,z,scale} so this module stays free of the DO's types).
+export function worldObjectCollider(o: { x: number; z: number; scale: number }): CircleCollider {
+  return { type: 'circle', x: o.x, z: o.z, r: WORLD_OBJECT_BASE_RADIUS * Math.max(0, o.scale) };
 }
 
 // Push (x,z) out of one collider. Returns the corrected point, or null if clear.
@@ -208,10 +240,11 @@ export function resolvePosition(seed: number, x: number, z: number, r = 0.5): { 
     const local = resolveAgainst(colliders, x - ox, z - oz, r);
     return { x: local.x + ox, z: local.z + oz };
   }
-  const grid = gridFor(seed);
   const key = Math.floor(x / GRID_CELL) + ',' + Math.floor(z / GRID_CELL);
-  const list = grid.cells.get(key);
-  if (!list) return { x, z };
+  const staticList = gridFor(seed).cells.get(key);
+  const dynList = dynamicGridCache.get(seed)?.cells.get(key);
+  if (!staticList && !dynList) return { x, z };
+  const list = staticList && dynList ? staticList.concat(dynList) : (staticList ?? dynList!);
   return resolveAgainst(list, x, z, r);
 }
 

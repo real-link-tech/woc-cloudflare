@@ -14,6 +14,7 @@ import type { Entity, PlayerClass, SimEvent } from '../sim/types';
 import { DT } from '../sim/types';
 import { parseMoveInputFrame } from '../sim/move_input';
 import { zoneAt, DUNGEONS } from '../sim/data';
+import { setDynamicColliders, worldObjectCollider } from '../sim/colliders';
 import { createWocDb, HyperdriveConn, type WocDb } from './db';
 import { PgSocialDb } from './social-db';
 import { SocialService, type SocialActor, type SocialEvent, type SocialTransport, type Presence, type PresenceStatus } from './social';
@@ -177,6 +178,7 @@ export class WorldRealmDurableObject {
       } catch (err) {
         console.error('failed to load world objects:', err);
       }
+      this.syncWorldObjectColliders();
     }
 
     let character;
@@ -703,6 +705,7 @@ export class WorldRealmDurableObject {
       try { await this.dbConn?.end(); } catch (err) { console.error('db close failed:', err); }
       this.dbConn = null;
       this.db = null;
+      if (this.sim) setDynamicColliders(this.sim.cfg.seed, []);
       this.sim = null;
       this.socialDb = null;
       this.social = null;
@@ -930,15 +933,28 @@ export class WorldRealmDurableObject {
       placedBy: conn.name,
     };
     this.worldObjects.set(id, obj);
+    this.syncWorldObjectColliders();
     this.broadcastJson({ t: 'world_object', op: 'add', obj });
     void this.saveWorldObjects();
   }
 
   private removeObject(id: string): void {
     if (this.worldObjects.delete(id)) {
+      this.syncWorldObjectColliders();
       this.broadcastJson({ t: 'world_object', op: 'remove', id });
       void this.saveWorldObjects();
     }
+  }
+
+  // Feed the current player-placed build into the sim's collision system so the
+  // authoritative movement/pathfinding resolves against it. Server-side only —
+  // clients keep rendering from the same WorldObject set and receive snapshots.
+  private syncWorldObjectColliders(): void {
+    if (!this.sim) return;
+    setDynamicColliders(
+      this.sim.cfg.seed,
+      [...this.worldObjects.values()].map(worldObjectCollider),
+    );
   }
 
   private async saveWorldObjects(): Promise<void> {

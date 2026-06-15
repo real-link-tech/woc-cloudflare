@@ -511,9 +511,15 @@ export class Sim {
       const dungeon = dungeonAt(savedPos.x) ?? DUNGEON_LIST[0];
       savedPos = { x: dungeon.doorPos.x, z: dungeon.doorPos.z - 4 };
     }
-    const startPos = savedPos
+    const grounded = savedPos
       ? this.groundPos(savedPos.x, savedPos.z)
       : this.groundPos(PLAYER_START.x, PLAYER_START.z);
+    // Nudge the spawn out of any solid geometry. A character saved while
+    // overlapping a building — or a player-placed object that appeared on top of
+    // it — must not spawn permanently wedged; resolvePosition slides it to the
+    // nearest free edge (and keeps spawns out of placed builds too).
+    const free = resolvePosition(this.cfg.seed, grounded.x, grounded.z, BODY_RADIUS);
+    const startPos = this.groundPos(free.x, free.z);
     const player = createPlayer(this.nextId++, cls, startPos, name);
     this.addEntity(player);
     const classDef = CLASSES[cls];
