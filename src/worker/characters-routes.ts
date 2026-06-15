@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { requireClerkUser } from './auth';
-import { createWocDb } from './db';
+import { createWocDb, HyperdriveConn } from './db';
 import type { PlayerClass } from '../sim/types';
 
 const REALM = 'Claudemoon';
@@ -20,11 +20,12 @@ export const charactersRoutes = new Hono<{ Bindings: CharEnv }>();
 charactersRoutes.get('/', async (c) => {
   const user = await requireClerkUser(c.req.header('Authorization') ?? null, c.env.CLERK_JWT_ISSUER);
   if (!user) return c.json({ error: 'not authenticated' }, 401);
-  const db = createWocDb(c.env.HYPERDRIVE.connectionString);
+  const conn = new HyperdriveConn(c.env.HYPERDRIVE.connectionString);
+  const db = createWocDb(conn);
   try {
     const chars = await db.listCharacters(user.userId, REALM);
     return c.json({ realm: REALM, characters: chars.map((x) => ({ id: x.id, name: x.name, class: x.class, level: x.level })) });
-  } finally { await db.end(); }
+  } finally { await conn.end(); }
 });
 
 charactersRoutes.post('/', async (c) => {
@@ -34,7 +35,8 @@ charactersRoutes.post('/', async (c) => {
   const name = typeof body?.name === 'string' ? body.name.trim().replace(/\s+/g, ' ') : '';
   if (!validName(name)) return c.json({ error: 'invalid character name (2-16 letters)' }, 400);
   if (!CLASSES.includes(body?.class)) return c.json({ error: 'invalid class' }, 400);
-  const db = createWocDb(c.env.HYPERDRIVE.connectionString);
+  const conn = new HyperdriveConn(c.env.HYPERDRIVE.connectionString);
+  const db = createWocDb(conn);
   try {
     const existing = await db.listCharacters(user.userId, REALM);
     if (existing.length >= 10) return c.json({ error: 'character limit reached' }, 400);
@@ -43,5 +45,5 @@ charactersRoutes.post('/', async (c) => {
   } catch (e: any) {
     if (String(e?.code) === '23505') return c.json({ error: 'that name is taken' }, 409);
     throw e;
-  } finally { await db.end(); }
+  } finally { await conn.end(); }
 });

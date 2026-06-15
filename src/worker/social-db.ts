@@ -3,9 +3,13 @@
 // character to a world/shard. The table names are prefixed `ipio_woc_` to match
 // the dev Neon schema (see migrations/0002_woc_social.sql), and the realm is
 // passed in by the DO rather than read from a process env constant.
+//
+// Single (autocommit) queries reuse the DO's warm HyperdriveConn (fast); the two
+// transactions use a fresh per-op Client (withClient) since BEGIN/COMMIT need a
+// connection to themselves.
 
 import { types } from 'pg';
-import { withClient } from './db';
+import { withClient, type HyperdriveConn } from './db';
 import type { CharInfo, CharRef, GuildRank, SocialDb } from './social';
 
 // Parse int8 (BIGINT/BIGSERIAL) as a JS number here too (also set in db.ts) so
@@ -17,96 +21,70 @@ types.setTypeParser(20, (v: string) => parseInt(v, 10));
 const CHAR_COLS = 'id, name, class AS cls, level, realm';
 
 export class PgSocialDb implements SocialDb {
-  constructor(private readonly connectionString: string, private readonly realm: string) {}
+  constructor(private readonly conn: HyperdriveConn, private readonly realm: string) {}
 
   async findCharacterByName(name: string): Promise<CharInfo | null> {
     // scoped to this realm: you can only friend/ignore/invite characters that
     // live on the same world as you. exact case wins; otherwise an unambiguous
     // case-insensitive match
-    return withClient(this.connectionString, async (c) => {
-      const exact = await c.query(`SELECT ${CHAR_COLS} FROM ipio_woc_characters WHERE name = $1 AND realm = $2`, [name, this.realm]);
-      if (exact.rows[0]) return exact.rows[0] as CharInfo;
-      const ci = await c.query(`SELECT ${CHAR_COLS} FROM ipio_woc_characters WHERE lower(name) = lower($1) AND realm = $2 LIMIT 2`, [name, this.realm]);
-      return ci.rows.length === 1 ? (ci.rows[0] as CharInfo) : null;
-    });
+    const exact = await this.conn.query<CharInfo>(`SELECT ${CHAR_COLS} FROM ipio_woc_characters WHERE name = $1 AND realm = $2`, [name, this.realm]);
+    if (exact.rows[0]) return exact.rows[0];
+    const ci = await this.conn.query<CharInfo>(`SELECT ${CHAR_COLS} FROM ipio_woc_characters WHERE lower(name) = lower($1) AND realm = $2 LIMIT 2`, [name, this.realm]);
+    return ci.rows.length === 1 ? ci.rows[0] : null;
   }
 
   async getCharacter(id: number): Promise<CharInfo | null> {
-    return withClient(this.connectionString, async (c) => {
-      const res = await c.query(`SELECT ${CHAR_COLS} FROM ipio_woc_characters WHERE id = $1 AND realm = $2`, [id, this.realm]);
-      return (res.rows[0] as CharInfo) ?? null;
-    });
+    const res = await this.conn.query<CharInfo>(`SELECT ${CHAR_COLS} FROM ipio_woc_characters WHERE id = $1 AND realm = $2`, [id, this.realm]);
+    return res.rows[0] ?? null;
   }
 
   async addFriend(charId: number, friendId: number): Promise<void> {
-    await withClient(this.connectionString, (c) =>
-      c.query(
-        'INSERT INTO ipio_woc_friendships (character_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-        [charId, friendId],
-      ),
-    );
+    await this.conn.query('INSERT INTO ipio_woc_friendships (character_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [charId, friendId]);
   }
 
   async removeFriend(charId: number, friendId: number): Promise<void> {
-    await withClient(this.connectionString, (c) =>
-      c.query('DELETE FROM ipio_woc_friendships WHERE character_id = $1 AND friend_id = $2', [charId, friendId]),
-    );
+    await this.conn.query('DELETE FROM ipio_woc_friendships WHERE character_id = $1 AND friend_id = $2', [charId, friendId]);
   }
 
   async listFriends(charId: number): Promise<CharInfo[]> {
-    return withClient(this.connectionString, async (c) => {
-      const res = await c.query(
-        `SELECT c.id, c.name, c.class AS cls, c.level, c.realm
-         FROM ipio_woc_friendships f JOIN ipio_woc_characters c ON c.id = f.friend_id
-         WHERE f.character_id = $1 ORDER BY c.name`,
-        [charId],
-      );
-      return res.rows as CharInfo[];
-    });
+    const res = await this.conn.query<CharInfo>(
+      `SELECT c.id, c.name, c.class AS cls, c.level, c.realm
+       FROM ipio_woc_friendships f JOIN ipio_woc_characters c ON c.id = f.friend_id
+       WHERE f.character_id = $1 ORDER BY c.name`,
+      [charId],
+    );
+    return res.rows;
   }
 
   async whoFriended(charId: number): Promise<number[]> {
-    return withClient(this.connectionString, async (c) => {
-      const res = await c.query('SELECT character_id FROM ipio_woc_friendships WHERE friend_id = $1', [charId]);
-      return res.rows.map((r) => (r as { character_id: number }).character_id);
-    });
+    const res = await this.conn.query<{ character_id: number }>('SELECT character_id FROM ipio_woc_friendships WHERE friend_id = $1', [charId]);
+    return res.rows.map((r) => r.character_id);
   }
 
   async addBlock(charId: number, blockedId: number): Promise<void> {
-    await withClient(this.connectionString, (c) =>
-      c.query(
-        'INSERT INTO ipio_woc_blocks (character_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-        [charId, blockedId],
-      ),
-    );
+    await this.conn.query('INSERT INTO ipio_woc_blocks (character_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [charId, blockedId]);
   }
 
   async removeBlock(charId: number, blockedId: number): Promise<void> {
-    await withClient(this.connectionString, (c) =>
-      c.query('DELETE FROM ipio_woc_blocks WHERE character_id = $1 AND blocked_id = $2', [charId, blockedId]),
-    );
+    await this.conn.query('DELETE FROM ipio_woc_blocks WHERE character_id = $1 AND blocked_id = $2', [charId, blockedId]);
   }
 
   async listBlocks(charId: number): Promise<CharRef[]> {
-    return withClient(this.connectionString, async (c) => {
-      const res = await c.query(
-        `SELECT c.id, c.name FROM ipio_woc_blocks b JOIN ipio_woc_characters c ON c.id = b.blocked_id
-         WHERE b.character_id = $1 ORDER BY c.name`,
-        [charId],
-      );
-      return res.rows as CharRef[];
-    });
+    const res = await this.conn.query<CharRef>(
+      `SELECT c.id, c.name FROM ipio_woc_blocks b JOIN ipio_woc_characters c ON c.id = b.blocked_id
+       WHERE b.character_id = $1 ORDER BY c.name`,
+      [charId],
+    );
+    return res.rows;
   }
 
   async blockedIds(charId: number): Promise<number[]> {
-    return withClient(this.connectionString, async (c) => {
-      const res = await c.query('SELECT blocked_id FROM ipio_woc_blocks WHERE character_id = $1', [charId]);
-      return res.rows.map((r) => (r as { blocked_id: number }).blocked_id);
-    });
+    const res = await this.conn.query<{ blocked_id: number }>('SELECT blocked_id FROM ipio_woc_blocks WHERE character_id = $1', [charId]);
+    return res.rows.map((r) => r.blocked_id);
   }
 
   async createGuildWithLeader(name: string, leaderId: number): Promise<{ guildId: number } | { error: 'name_taken' | 'already_in_guild' }> {
-    return withClient(this.connectionString, async (client) => {
+    return withClient(this.conn.connectionString, async (client) => {
       try {
         await client.query('BEGIN');
         let guildId: number;
@@ -137,26 +115,22 @@ export class PgSocialDb implements SocialDb {
   }
 
   async deleteGuild(id: number): Promise<void> {
-    await withClient(this.connectionString, (c) =>
-      c.query('DELETE FROM ipio_woc_guilds WHERE id = $1', [id]),
-    );
+    await this.conn.query('DELETE FROM ipio_woc_guilds WHERE id = $1', [id]);
   }
 
   async guildMembership(charId: number): Promise<{ guildId: number; guildName: string; rank: GuildRank } | null> {
-    return withClient(this.connectionString, async (c) => {
-      const res = await c.query(
-        `SELECT gm.guild_id, g.name AS guild_name, gm.rank
-         FROM ipio_woc_guild_members gm JOIN ipio_woc_guilds g ON g.id = gm.guild_id
-         WHERE gm.character_id = $1`,
-        [charId],
-      );
-      const row = res.rows[0] as { guild_id: number; guild_name: string; rank: GuildRank } | undefined;
-      return row ? { guildId: row.guild_id, guildName: row.guild_name, rank: row.rank } : null;
-    });
+    const res = await this.conn.query<{ guild_id: number; guild_name: string; rank: GuildRank }>(
+      `SELECT gm.guild_id, g.name AS guild_name, gm.rank
+       FROM ipio_woc_guild_members gm JOIN ipio_woc_guilds g ON g.id = gm.guild_id
+       WHERE gm.character_id = $1`,
+      [charId],
+    );
+    const row = res.rows[0];
+    return row ? { guildId: row.guild_id, guildName: row.guild_name, rank: row.rank } : null;
   }
 
   async addGuildMemberAtomic(guildId: number, charId: number, rank: GuildRank, limit: number): Promise<'ok' | 'full' | 'already_member' | 'no_guild'> {
-    return withClient(this.connectionString, async (client) => {
+    return withClient(this.conn.connectionString, async (client) => {
       try {
         await client.query('BEGIN');
         // lock the guild row so concurrent accepts serialize — without this the
@@ -186,26 +160,20 @@ export class PgSocialDb implements SocialDb {
   }
 
   async removeGuildMember(charId: number): Promise<void> {
-    await withClient(this.connectionString, (c) =>
-      c.query('DELETE FROM ipio_woc_guild_members WHERE character_id = $1', [charId]),
-    );
+    await this.conn.query('DELETE FROM ipio_woc_guild_members WHERE character_id = $1', [charId]);
   }
 
   async setGuildRank(charId: number, rank: GuildRank): Promise<void> {
-    await withClient(this.connectionString, (c) =>
-      c.query('UPDATE ipio_woc_guild_members SET rank = $2 WHERE character_id = $1', [charId, rank]),
-    );
+    await this.conn.query('UPDATE ipio_woc_guild_members SET rank = $2 WHERE character_id = $1', [charId, rank]);
   }
 
   async guildMembers(guildId: number): Promise<(CharInfo & { rank: GuildRank })[]> {
-    return withClient(this.connectionString, async (c) => {
-      const res = await c.query(
-        `SELECT c.id, c.name, c.class AS cls, c.level, c.realm, gm.rank
-         FROM ipio_woc_guild_members gm JOIN ipio_woc_characters c ON c.id = gm.character_id
-         WHERE gm.guild_id = $1 ORDER BY gm.joined_at`,
-        [guildId],
-      );
-      return res.rows as (CharInfo & { rank: GuildRank })[];
-    });
+    const res = await this.conn.query<CharInfo & { rank: GuildRank }>(
+      `SELECT c.id, c.name, c.class AS cls, c.level, c.realm, gm.rank
+       FROM ipio_woc_guild_members gm JOIN ipio_woc_characters c ON c.id = gm.character_id
+       WHERE gm.guild_id = $1 ORDER BY gm.joined_at`,
+      [guildId],
+    );
+    return res.rows;
   }
 }

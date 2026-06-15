@@ -33,9 +33,9 @@ export interface WocDb {
   end(): Promise<void>;
 }
 
-// Hyperdrive pools connections at the edge, so a fresh short-lived Client per
-// operation is the recommended pattern (a long-lived Pool inside a Durable
-// Object holds connections that go stale and hang). Connect, run, always close.
+// A fresh short-lived Client per call — used for TRANSACTIONS (BEGIN/COMMIT must
+// own a connection exclusively, with no other query interleaving on it). Connect,
+// run, always close. Hyperdrive makes connect fast.
 export async function withClient<T>(connectionString: string, fn: (c: Client) => Promise<T>): Promise<T> {
   const client = new Client({ connectionString });
   await client.connect();
@@ -46,72 +46,125 @@ export async function withClient<T>(connectionString: string, fn: (c: Client) =>
   }
 }
 
-export function createWocDb(connectionString: string): WocDb {
+// A single WARM, self-healing Client for repeated single (autocommit) queries
+// inside a long-lived Durable Object. Opening a fresh Client per query (withClient)
+// is correct but pays a connect round-trip every time, which made multi-query ops
+// like social.snapshot (4 queries) take 1-2s. A reused connection is fast.
+//
+// The reason we ditched pg.Pool was that it handed out DEAD connections that hung
+// FOREVER. We avoid that here with: (a) `query_timeout`/`statement_timeout`, so a
+// query on a stale/dead socket FAILS fast instead of hanging; and (b) reset() on
+// any error + a connection-level 'error' listener, so the next call reconnects.
+// In an active realm the connection stays warm (autosave + social ops use it),
+// so staleness is rare and self-heals when it happens.
+//
+// Concurrent .query() calls are safe: node-postgres queues queries on one Client.
+// Transactions must NOT use this (they need exclusivity) — they use withClient.
+export class HyperdriveConn {
+  private client: Client | null = null;
+  private connecting: Promise<Client> | null = null;
+  constructor(readonly connectionString: string) {}
+
+  private async get(): Promise<Client> {
+    if (this.client) return this.client;
+    if (this.connecting) return this.connecting;
+    this.connecting = (async () => {
+      const c = new Client({
+        connectionString: this.connectionString,
+        query_timeout: 10_000,
+        statement_timeout: 10_000,
+        connectionTimeoutMillis: 10_000,
+      });
+      // A connection-level error (socket dropped by Neon/Hyperdrive) invalidates
+      // the client so the next query reconnects instead of using a dead socket.
+      c.on('error', () => { if (this.client === c) this.client = null; });
+      await c.connect();
+      this.client = c;
+      this.connecting = null;
+      return c;
+    })().catch((err) => { this.connecting = null; throw err; });
+    return this.connecting;
+  }
+
+  async query<R = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: R[]; rowCount: number | null }> {
+    try {
+      const c = await this.get();
+      const res = await c.query(sql, params);
+      return { rows: res.rows as R[], rowCount: res.rowCount };
+    } catch (err) {
+      // The connection may be dead/timed-out — drop it so the next call reconnects.
+      this.reset();
+      throw err;
+    }
+  }
+
+  private reset(): void {
+    const c = this.client;
+    this.client = null;
+    this.connecting = null;
+    void c?.end().catch(() => { /* already closing */ });
+  }
+
+  async end(): Promise<void> {
+    const c = this.client;
+    this.client = null;
+    this.connecting = null;
+    await c?.end().catch(() => { /* already closing */ });
+  }
+}
+
+// Build a WocDb over a warm HyperdriveConn (single queries reuse one connection).
+export function createWocDb(conn: HyperdriveConn): WocDb {
   return {
-    listCharacters(userId, realm) {
-      return withClient(connectionString, async (c) => {
-        const r = await c.query<CharacterRow>(
-          'SELECT id, ipio_user_id, name, class, level, state, is_gm FROM ipio_woc_characters WHERE ipio_user_id=$1 AND realm=$2 ORDER BY id',
-          [userId, realm],
-        );
-        return r.rows;
-      });
+    async listCharacters(userId, realm) {
+      const r = await conn.query<CharacterRow>(
+        'SELECT id, ipio_user_id, name, class, level, state, is_gm FROM ipio_woc_characters WHERE ipio_user_id=$1 AND realm=$2 ORDER BY id',
+        [userId, realm],
+      );
+      return r.rows;
     },
-    getCharacter(userId, characterId, realm) {
-      return withClient(connectionString, async (c) => {
-        const r = await c.query<CharacterRow>(
-          'SELECT id, ipio_user_id, name, class, level, state, is_gm FROM ipio_woc_characters WHERE id=$1 AND ipio_user_id=$2 AND realm=$3',
-          [characterId, userId, realm],
-        );
-        return r.rows[0] ?? null;
-      });
+    async getCharacter(userId, characterId, realm) {
+      const r = await conn.query<CharacterRow>(
+        'SELECT id, ipio_user_id, name, class, level, state, is_gm FROM ipio_woc_characters WHERE id=$1 AND ipio_user_id=$2 AND realm=$3',
+        [characterId, userId, realm],
+      );
+      return r.rows[0] ?? null;
     },
-    createCharacter(userId, name, cls, realm) {
-      return withClient(connectionString, async (c) => {
-        const r = await c.query<CharacterRow>(
-          'INSERT INTO ipio_woc_characters (ipio_user_id, name, class, realm) VALUES ($1,$2,$3,$4) RETURNING id, ipio_user_id, name, class, level, state, is_gm',
-          [userId, name, cls, realm],
-        );
-        return r.rows[0];
-      });
+    async createCharacter(userId, name, cls, realm) {
+      const r = await conn.query<CharacterRow>(
+        'INSERT INTO ipio_woc_characters (ipio_user_id, name, class, realm) VALUES ($1,$2,$3,$4) RETURNING id, ipio_user_id, name, class, level, state, is_gm',
+        [userId, name, cls, realm],
+      );
+      return r.rows[0];
     },
-    saveCharacterState(characterId, level, state) {
-      return withClient(connectionString, async (c) => {
-        await c.query(
-          'UPDATE ipio_woc_characters SET level=$2, state=$3, updated_at=now() WHERE id=$1',
-          [characterId, level, JSON.stringify(state)],
-        );
-      });
+    async saveCharacterState(characterId, level, state) {
+      await conn.query(
+        'UPDATE ipio_woc_characters SET level=$2, state=$3, updated_at=now() WHERE id=$1',
+        [characterId, level, JSON.stringify(state)],
+      );
     },
-    openPlaySession(userId, characterId, name) {
-      return withClient(connectionString, async (c) => {
-        const r = await c.query<{ id: number }>(
-          'INSERT INTO ipio_woc_play_sessions (ipio_user_id, character_id, character_name) VALUES ($1,$2,$3) RETURNING id',
-          [userId, characterId, name],
-        );
-        return r.rows[0].id;
-      });
+    async openPlaySession(userId, characterId, name) {
+      const r = await conn.query<{ id: number }>(
+        'INSERT INTO ipio_woc_play_sessions (ipio_user_id, character_id, character_name) VALUES ($1,$2,$3) RETURNING id',
+        [userId, characterId, name],
+      );
+      return r.rows[0].id;
     },
-    closePlaySession(sessionId) {
-      return withClient(connectionString, async (c) => {
-        await c.query('UPDATE ipio_woc_play_sessions SET ended_at=now() WHERE id=$1 AND ended_at IS NULL', [sessionId]);
-      });
+    async closePlaySession(sessionId) {
+      await conn.query('UPDATE ipio_woc_play_sessions SET ended_at=now() WHERE id=$1 AND ended_at IS NULL', [sessionId]);
     },
-    loadWorldState<T>(realm: string, key: string): Promise<T | null> {
-      return withClient(connectionString, async (c) => {
-        const r = await c.query<{ data: T }>('SELECT data FROM ipio_woc_world_state WHERE realm=$1 AND key=$2', [realm, key]);
-        return r.rows[0]?.data ?? null;
-      });
+    async loadWorldState<T>(realm: string, key: string): Promise<T | null> {
+      const r = await conn.query<{ data: T }>('SELECT data FROM ipio_woc_world_state WHERE realm=$1 AND key=$2', [realm, key]);
+      return r.rows[0]?.data ?? null;
     },
-    saveWorldState(realm, key, data) {
-      return withClient(connectionString, async (c) => {
-        await c.query(
-          'INSERT INTO ipio_woc_world_state (realm,key,data,updated_at) VALUES ($1,$2,$3,now()) ON CONFLICT (realm,key) DO UPDATE SET data=EXCLUDED.data, updated_at=now()',
-          [realm, key, JSON.stringify(data)],
-        );
-      });
+    async saveWorldState(realm, key, data) {
+      await conn.query(
+        'INSERT INTO ipio_woc_world_state (realm,key,data,updated_at) VALUES ($1,$2,$3,now()) ON CONFLICT (realm,key) DO UPDATE SET data=EXCLUDED.data, updated_at=now()',
+        [realm, key, JSON.stringify(data)],
+      );
     },
-    // No pool to close; each operation opens and closes its own Client.
+    // The shared HyperdriveConn is owned + closed by the caller (the DO), so this
+    // is a no-op — the WocDb doesn't own the connection.
     async end() {},
   };
 }

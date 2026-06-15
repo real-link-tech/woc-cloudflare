@@ -14,7 +14,7 @@ import type { Entity, PlayerClass, SimEvent } from '../sim/types';
 import { DT } from '../sim/types';
 import { parseMoveInputFrame } from '../sim/move_input';
 import { zoneAt, DUNGEONS } from '../sim/data';
-import { createWocDb, type WocDb } from './db';
+import { createWocDb, HyperdriveConn, type WocDb } from './db';
 import { PgSocialDb } from './social-db';
 import { SocialService, type SocialActor, type SocialEvent, type SocialTransport, type Presence, type PresenceStatus } from './social';
 import { round2, wireEntity } from './wire';
@@ -57,10 +57,15 @@ export class WorldRealmDurableObject {
   private db: WocDb | null = null;
   private interval: number | null = null;
 
-  // Social system (friends/ignore/guilds/presence). PgSocialDb opens a fresh
-  // per-operation Hyperdrive Client from the connection string (no long-lived
-  // pool), created lazily on first connect. SocialService is the pure engine
-  // wired to that DB + a transport bridging to live DO state.
+  // One warm, self-healing Hyperdrive connection shared by WocDb + the social DB
+  // for fast repeated single queries (a fresh connect per query made social.snapshot
+  // slow). Transactions still open their own short-lived Client. Closed on drain.
+  private dbConn: HyperdriveConn | null = null;
+
+  // Social system (friends/ignore/guilds/presence). PgSocialDb runs single queries
+  // on the shared warm connection and transactions on a fresh per-op Client.
+  // SocialService is the pure engine wired to that DB + a transport bridging to
+  // live DO state.
   private socialDb: PgSocialDb | null = null;
   private social: SocialService | null = null;
 
@@ -104,11 +109,14 @@ export class WorldRealmDurableObject {
     if (!this.sim) {
       this.sim = new Sim({ seed: 20061, playerClass: 'warrior', noPlayer: true });
     }
+    if (!this.dbConn) {
+      this.dbConn = new HyperdriveConn(this.env.HYPERDRIVE.connectionString);
+    }
     if (!this.db) {
-      this.db = createWocDb(this.env.HYPERDRIVE.connectionString);
+      this.db = createWocDb(this.dbConn);
     }
     if (!this.social) {
-      this.socialDb = new PgSocialDb(this.env.HYPERDRIVE.connectionString, realm);
+      this.socialDb = new PgSocialDb(this.dbConn, realm);
       this.social = new SocialService(this.socialDb, this.buildSocialTransport());
     }
     const sim = this.sim;
@@ -176,20 +184,25 @@ export class WorldRealmDurableObject {
     server.addEventListener('close', () => { void this.handleClose(conn); });
     server.addEventListener('error', () => { void this.handleClose(conn); });
 
-    // Social init (mirrors GameServer.initSocial): load the ignore list, send
-    // the friends/ignore/guild panel, and announce presence to friends/guildmates.
-    try {
-      conn.blockedIds = new Set(await socialDb.blockedIds(characterId));
-    } catch (err) {
-      console.error('failed to load block list:', err);
-    }
-    await this.sendSocialSnapshot(characterId);
-    void social.announcePresence({ characterId, name: conn.name }, true)
-      .catch((err) => console.error('presence announce failed:', err));
-
     this.startLoop();
     // Watchdog: keep the alarm armed while players are connected.
     void this.ctx.storage.setAlarm(Date.now() + 60_000);
+
+    // Social init (mirrors GameServer.initSocial) runs FIRE-AND-FORGET so the WS
+    // upgrade returns immediately. Blocking the 101 on these queries (ignore list
+    // + the 4-query social snapshot + presence announce) left the client socket
+    // CONNECTING for the whole DB round-trip. The socket is already accepted, so
+    // the snapshot/events sent here are buffered and delivered once it opens.
+    void (async () => {
+      try {
+        conn.blockedIds = new Set(await socialDb.blockedIds(characterId));
+      } catch (err) {
+        console.error('failed to load block list:', err);
+      }
+      await this.sendSocialSnapshot(characterId).catch((err) => console.error('social snapshot failed:', err));
+      await social.announcePresence({ characterId, name: conn.name }, true)
+        .catch((err) => console.error('presence announce failed:', err));
+    })();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -629,15 +642,16 @@ export class WorldRealmDurableObject {
     }
 
     if (this.sockets.size === 0) {
-      // Drain to nothing: persist everything, stop the loop, and forget the sim
-      // so the next connection re-inits a fresh authoritative world. There is no
-      // pool to drop — each DB op opens and closes its own Hyperdrive Client.
+      // Drain to nothing: persist everything, stop the loop, close the warm DB
+      // connection, and forget the sim so the next connection re-inits a fresh
+      // authoritative world.
       await this.saveAll();
       if (this.interval) {
         clearInterval(this.interval);
         this.interval = null;
       }
-      try { await this.db?.end(); } catch (err) { console.error('db close failed:', err); }
+      try { await this.dbConn?.end(); } catch (err) { console.error('db close failed:', err); }
+      this.dbConn = null;
       this.db = null;
       this.sim = null;
       this.socialDb = null;

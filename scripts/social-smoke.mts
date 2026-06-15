@@ -1,8 +1,8 @@
 import WebSocket from 'ws';
-import { createWocDb } from '../src/worker/db';
+import { createWocDb, HyperdriveConn } from '../src/worker/db';
 import { signPlayToken } from '../src/worker/play-token';
 const DB=process.env.DATABASE_URL!, SEC=process.env.PLAY_SESSION_SIGNING_SECRET!;
-const db=createWocDb(DB); const user=`soc_${Date.now()%100000}`;
+const db=createWocDb(new HyperdriveConn(DB)); const user=`soc_${Date.now()%100000}`;
 const ltr=()=>String.fromCharCode(97+Math.floor(Math.random()*26));
 const nm=(p:string)=>p+Array.from({length:6},ltr).join('');
 const A=await db.createCharacter(user,nm('Aa'),'warrior','Claudemoon');

@@ -1,8 +1,8 @@
 import WebSocket from 'ws';
-import { createWocDb } from '../src/worker/db';
+import { createWocDb, HyperdriveConn } from '../src/worker/db';
 import { signPlayToken } from '../src/worker/play-token';
 const DB=process.env.DATABASE_URL!, SEC=process.env.PLAY_SESSION_SIGNING_SECRET!;
-const db=createWocDb(DB); const user=`m2smoke_${Date.now()%100000}`;
+const db=createWocDb(new HyperdriveConn(DB)); const user=`m2smoke_${Date.now()%100000}`;
 const c=await db.createCharacter(user,`Qq${Date.now()%9999}`,'warrior','Claudemoon');
 const tok=await signPlayToken({userId:user,characterId:c.id},SEC,120);
 const ws=new WebSocket(`wss://woc-dev.ipio.ai/ws?token=${encodeURIComponent(tok)}&realm=Claudemoon`);

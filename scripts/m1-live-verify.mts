@@ -5,7 +5,7 @@
 // Run:
 //   DATABASE_URL=... PLAY_SESSION_SIGNING_SECRET=... npx tsx scripts/m1-live-verify.mts
 import WebSocket from 'ws';
-import { createWocDb } from '../src/worker/db';
+import { createWocDb, HyperdriveConn } from '../src/worker/db';
 import { signPlayToken } from '../src/worker/play-token';
 
 const HOST = process.env.WOC_HOST ?? 'woc-dev.ipio.ai';
@@ -37,7 +37,7 @@ async function connect(label: string, token: string): Promise<Conn> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-  const db = createWocDb(DB);
+  const db = createWocDb(new HyperdriveConn(DB));
   const user = `m1verify_${rand(0)}`;
   console.log(`creating 2 characters for ${user}...`);
   const a = await db.createCharacter(user, `Alpha${rand(1) % 1000}`, 'warrior', REALM);
