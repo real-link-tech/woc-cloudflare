@@ -34,6 +34,18 @@ export interface CharacterSummary {
   forceRename: boolean;
 }
 
+// A player-placed IPIO library asset, mirrored from the server (build feature).
+export interface WorldObject {
+  id: string;
+  ipAssetId: string;
+  glbUrl: string;
+  name: string;
+  x: number; y: number; z: number;
+  rot: number;
+  scale: number;
+  placedBy: string;
+}
+
 export function buildWebSocketUrl(protocol: string, host: string): string {
   const proto = protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${host}/ws`;
@@ -271,6 +283,9 @@ export class ClientWorld implements IWorld {
   marketInfo: MarketInfo | null = null;
   markers: Record<number, number> = {}; // entityId -> markerId, mirrored from the self-wire
   realm = '';
+  // Placed IPIO library assets mirrored from the server (the build feature).
+  worldObjects = new Map<string, WorldObject>();
+  private worldObjectsDirty = false;
   // bumped whenever a fresh social snapshot lands, so an open panel re-renders
   private socialDirty = false;
   // snapshot interpolation
@@ -495,9 +510,43 @@ export class ClientWorld implements IWorld {
       }
       return;
     }
+    if (msg.t === 'world_objects') {
+      // full set on connect: replace the local cache
+      this.worldObjects.clear();
+      for (const o of (msg.list ?? []) as WorldObject[]) this.worldObjects.set(o.id, o);
+      this.worldObjectsDirty = true;
+      return;
+    }
+    if (msg.t === 'world_object') {
+      if (msg.op === 'add' && msg.obj) this.worldObjects.set(msg.obj.id, msg.obj as WorldObject);
+      else if (msg.op === 'remove' && typeof msg.id === 'string') this.worldObjects.delete(msg.id);
+      this.worldObjectsDirty = true;
+      return;
+    }
     if (msg.t === 'snap') {
       this.applySnapshot(msg);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // World objects (the "build the world" feature): placed IPIO library assets,
+  // mirrored from the server. The renderer polls consumeWorldObjectsChanged()
+  // and (re)loads GLBs for adds/removes.
+  // -----------------------------------------------------------------------
+
+  consumeWorldObjectsChanged(): boolean {
+    const v = this.worldObjectsDirty;
+    this.worldObjectsDirty = false;
+    return v;
+  }
+
+  // Place an IPIO library asset into the world at a ground position.
+  placeWorldObject(params: { ipAssetId: string; glbUrl: string; name: string; x: number; y?: number; z: number; rot?: number; scale?: number }): void {
+    this.cmd({ cmd: 'place_object', ...params });
+  }
+
+  removeWorldObject(id: string): void {
+    this.cmd({ cmd: 'remove_object', id });
   }
 
   consumeSocialChanged(): boolean {
