@@ -1,0 +1,21 @@
+{
+  "name": "woc-cloudflare",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-03-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "./dist", "binding": "ASSETS", "html_handling": "none" },
+  "vars": {
+    "CLERK_PUBLISHABLE_KEY": "pk_test_cmVuZXdpbmctbW9uYXJjaC01LmNsZXJrLmFjY291bnRzLmRldiQ",
+    "CLERK_JWT_ISSUER": "https://renewing-monarch-5.clerk.accounts.dev"
+  },
+  "env": {
+    "dev": {
+      "name": "woc-cloudflare-dev",
+      "routes": [{ "pattern": "woc-dev.ipio.ai", "custom_domain": true }],
+      "vars": {
+        "CLERK_PUBLISHABLE_KEY": "pk_test_cmVuZXdpbmctbW9uYXJjaC01LmNsZXJrLmFjY291bnRzLmRldiQ",
+        "CLERK_JWT_ISSUER": "https://renewing-monarch-5.clerk.accounts.dev"
+      }
+    }
+  }
+}

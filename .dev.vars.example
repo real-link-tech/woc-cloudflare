@@ -1,0 +1,4 @@
+# Copy to .dev.vars (gitignored) for `wrangler dev`. Pull real values from
+# the monorepo's coordination/api/.dev.vars — do NOT commit real values.
+CLERK_SECRET_KEY=
+PLAY_SESSION_SIGNING_SECRET=
