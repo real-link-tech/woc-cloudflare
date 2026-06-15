@@ -573,6 +573,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
           z: g.z,
           rot: 0,
           scale: buildScale,
+          footprintR: worldObjects.footprintFor(buildMode.glbUrl),
         });
       }
       return;

@@ -160,15 +160,20 @@ export function setDynamicColliders(seed: number, colliders: Collider[]): void {
   else dynamicGridCache.set(seed, buildGrid(colliders));
 }
 
-// Approximate ground footprint of a placed asset: we don't store per-model
-// bounds, so a circle of this base radius scaled by the placement scale stands
-// in. Tune here if placed props feel too "fat" or too "thin" to walk around.
+// Fallback ground footprint when a placed asset has no client-measured bounds
+// (old saves, or a model that hadn't finished loading at place time): a circle
+// of this base radius scaled by the placement scale.
 export const WORLD_OBJECT_BASE_RADIUS = 0.5;
 
 // A circle collider for one placed world object (sim-layer shape — the caller
-// passes the minimal {x,z,scale} so this module stays free of the DO's types).
-export function worldObjectCollider(o: { x: number; z: number; scale: number }): CircleCollider {
-  return { type: 'circle', x: o.x, z: o.z, r: WORLD_OBJECT_BASE_RADIUS * Math.max(0, o.scale) };
+// passes the minimal fields so this module stays free of the DO's types).
+// `footprint` is the model's UNSCALED XZ radius (measured client-side); the
+// collider is that × the placement scale, so collision tracks the real size.
+export function worldObjectCollider(
+  o: { x: number; z: number; scale: number; footprint?: number },
+): CircleCollider {
+  const base = o.footprint !== undefined && o.footprint > 0 ? o.footprint : WORLD_OBJECT_BASE_RADIUS;
+  return { type: 'circle', x: o.x, z: o.z, r: base * Math.max(0, o.scale) };
 }
 
 // Push (x,z) out of one collider. Returns the corrected point, or null if clear.

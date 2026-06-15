@@ -44,6 +44,22 @@ function loadGlb(url: string): Promise<GLTF> {
   return p;
 }
 
+// Unscaled XZ footprint radius per glbUrl, measured from the parsed model so the
+// server's collision circle can match the model's real size (× placement scale)
+// instead of a one-size-fits-all guess. Populated whenever a model is loaded
+// (preview or spawn); read synchronously at place time via footprintFor().
+const footprintCache = new Map<string, number>();
+function measureFootprint(url: string, scene: THREE.Object3D): number {
+  let r = footprintCache.get(url);
+  if (r !== undefined) return r;
+  const size = new THREE.Box3().setFromObject(scene).getSize(new THREE.Vector3());
+  // half the larger horizontal extent — a circle that covers the model's wider
+  // side. Guard against empty/degenerate boxes (Infinity from no geometry).
+  r = Number.isFinite(size.x) && Number.isFinite(size.z) ? Math.max(size.x, size.z) / 2 : 0;
+  footprintCache.set(url, r);
+  return r;
+}
+
 export class WorldObjectsLayer {
   private readonly rendered = new Map<string, THREE.Object3D>();
   // ids whose GLB is mid-flight, so a second reconcile pass before the load
@@ -67,6 +83,7 @@ export class WorldObjectsLayer {
     const token = ++this.previewToken;
     try {
       const gltf = await loadGlb(glbUrl);
+      measureFootprint(glbUrl, gltf.scene); // cache footprint for place-time collision
       if (token !== this.previewToken) return; // superseded by a newer selection
       const ghost = gltf.scene.clone(true);
       // Clone materials (the cache shares them across instances) and make them a
@@ -145,6 +162,7 @@ export class WorldObjectsLayer {
   private async spawn(obj: WorldObject, desired: Map<string, WorldObject>): Promise<void> {
     try {
       const gltf = await loadGlb(obj.glbUrl);
+      measureFootprint(obj.glbUrl, gltf.scene); // keep footprint cache warm
       // Bail if it was removed (or somehow already added) while loading.
       if (!desired.has(obj.id) || this.rendered.has(obj.id)) return;
       const group = gltf.scene.clone(true);
@@ -170,6 +188,14 @@ export class WorldObjectsLayer {
   // The currently-rendered object groups, for build-mode delete raycasting.
   objects(): THREE.Object3D[] {
     return [...this.rendered.values()];
+  }
+
+  // Unscaled XZ footprint radius for a glbUrl, if it has been loaded (preview or
+  // spawn). Sent with place_object so the server's collider matches the model's
+  // real size. Undefined until the model loads — the server falls back to a base
+  // radius, which the preview/selection always populates before a click.
+  footprintFor(glbUrl: string): number | undefined {
+    return footprintCache.get(glbUrl);
   }
 
   // Raycast the placed-object groups at a screen point and return the owning

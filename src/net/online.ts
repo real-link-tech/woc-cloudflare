@@ -43,6 +43,7 @@ export interface WorldObject {
   x: number; y: number; z: number;
   rot: number;
   scale: number;
+  footprint?: number; // unscaled XZ collider radius (collision matches model size)
   placedBy: string;
 }
 
@@ -541,7 +542,7 @@ export class ClientWorld implements IWorld {
   }
 
   // Place an IPIO library asset into the world at a ground position.
-  placeWorldObject(params: { ipAssetId: string; glbUrl: string; name: string; x: number; y?: number; z: number; rot?: number; scale?: number }): void {
+  placeWorldObject(params: { ipAssetId: string; glbUrl: string; name: string; x: number; y?: number; z: number; rot?: number; scale?: number; footprintR?: number }): void {
     this.cmd({ cmd: 'place_object', ...params });
   }
 

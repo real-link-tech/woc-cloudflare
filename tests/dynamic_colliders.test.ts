@@ -36,6 +36,16 @@ describe('dynamic (player-placed) colliders', () => {
     expect(isBlocked(SEED, probe.x, probe.z, 0.5)).toBe(true);
   });
 
+  it('a measured footprint sizes the collider (× scale), not the base radius', () => {
+    // footprint 2 (unscaled) × scale 2 = radius 4. A point 3 units away — clear
+    // of the base-radius circle (0.5*2=1) but inside the footprint circle — blocks.
+    setDynamicColliders(SEED, [worldObjectCollider({ x: OPEN.x, z: OPEN.z, scale: 2, footprint: 2 })]);
+    expect(isBlocked(SEED, OPEN.x + 3, OPEN.z, 0.5)).toBe(true);
+    // base-radius equivalent (no footprint) would NOT block at 3 units:
+    setDynamicColliders(SEED, [worldObjectCollider({ x: OPEN.x, z: OPEN.z, scale: 2 })]);
+    expect(isBlocked(SEED, OPEN.x + 3, OPEN.z, 0.5)).toBe(false);
+  });
+
   it('clearing the set restores walkability', () => {
     setDynamicColliders(SEED, [worldObjectCollider({ x: OPEN.x, z: OPEN.z, scale: 3 })]);
     expect(isBlocked(SEED, OPEN.x, OPEN.z, 0.5)).toBe(true);
