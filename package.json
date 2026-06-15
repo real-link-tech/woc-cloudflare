@@ -22,7 +22,8 @@
     "worker:dev": "wrangler dev",
     "worker:build": "npm run build && wrangler deploy --dry-run --outdir=dist-worker",
     "deploy:dev": "npm run build && wrangler deploy --env dev --minify",
-    "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit"
+    "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@clerk/clerk-js": "^5.125.13",
@@ -36,12 +37,15 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@clerk/testing": "^2.1.1",
     "@cloudflare/workers-types": "^4.20260101.0",
     "@gltf-transform/cli": "^4.4.0",
+    "@playwright/test": "^1.61.0",
     "@types/node": "^25.9.2",
     "@types/pg": "^8.20.0",
     "@types/three": "^0.165.0",
     "@types/ws": "^8.18.1",
+    "dotenv": "^17.4.2",
     "esbuild": "^0.28.1",
     "puppeteer-core": "^25.1.0",
     "typescript": "^5.5.0",
