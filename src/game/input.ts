@@ -18,6 +18,9 @@ export interface InputCallbacks {
   onAbility(slot: number): void;
   onUiKey(key: 'interact' | 'bags' | 'char' | 'spellbook' | 'talents' | 'questlog' | 'map' | 'nameplates' | 'escape' | 'chat' | 'meters' | 'social' | 'arena' | 'leaderboard' | 'build'): void;
   onClickPick(x: number, y: number, button: number): void;
+  /** Build mode: scroll resizes the placement preview. Return true to consume the
+   *  wheel event (so it doesn't also zoom the camera). */
+  onBuildWheel?: (deltaSign: number) => boolean;
   /** When false, edge actions (spells, UI keys) are ignored. */
   canUseGameKeys?: () => boolean;
 }
@@ -81,6 +84,8 @@ export class Input {
     window.addEventListener('mousemove', (e) => this.onMouseMove(e));
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
+      // In build mode the wheel resizes the placement preview instead of zooming.
+      if (this.cb.onBuildWheel?.(Math.sign(e.deltaY))) return;
       this.camDist = Math.min(22, Math.max(3, this.camDist + Math.sign(e.deltaY) * 1.4));
     }, { passive: false });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());

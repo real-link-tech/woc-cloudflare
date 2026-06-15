@@ -418,6 +418,14 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       }
     },
     onClickPick: (x, y, button) => handlePick(x, y, button),
+    onBuildWheel: (deltaSign) => {
+      if (!buildMode) return false;
+      // scroll up grows the preview, down shrinks it (multiplicative feels natural)
+      const factor = deltaSign < 0 ? 1.12 : 1 / 1.12;
+      buildScale = Math.min(BUILD_SCALE_MAX, Math.max(BUILD_SCALE_MIN, buildScale * factor));
+      updateBuildHint();
+      return true;
+    },
     canUseGameKeys: () => !hud.isModalOpen() && chatInput.style.display !== 'block',
   }, keybinds);
   input.camYaw = world.player.facing;
@@ -485,17 +493,25 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     // render whatever the server already mirrored on connect
     worldObjects.reconcile(online);
   }
-  // Build mode: the asset selected in the palette, ready to drop on click.
+  // Build mode: the asset selected in the palette, ready to drop on click. A
+  // translucent preview follows the cursor and the scroll wheel resizes it
+  // (WoW/WC3-style building placement).
   let buildMode: BuildAsset | null = null;
+  let buildScale = 1.5;
+  const BUILD_SCALE_MIN = 0.3, BUILD_SCALE_MAX = 12;
+  function updateBuildHint(): void {
+    const hint = document.getElementById('build-hint');
+    if (!hint) return;
+    hint.textContent = buildMode
+      ? `Placing “${buildMode.name}” — scroll to resize (${buildScale.toFixed(1)}×) · click to place · Esc / right-click to stop`
+      : '';
+  }
   function setBuildMode(asset: BuildAsset | null): void {
     buildMode = asset;
     document.body.classList.toggle('building', asset !== null);
-    const hint = document.getElementById('build-hint');
-    if (hint) {
-      hint.textContent = asset
-        ? `Placing “${asset.name}” — click the ground to place, Esc / right-click to stop.`
-        : '';
-    }
+    if (asset) { buildScale = 1.5; void worldObjects?.setPreview(asset.glbUrl); }
+    else worldObjects?.clearPreview();
+    updateBuildHint();
   }
   if (online) {
     hud.onBuildAssetSelected = (asset) => setBuildMode(asset);
@@ -556,7 +572,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
           x: g.x,
           z: g.z,
           rot: 0,
-          scale: 1,
+          scale: buildScale,
         });
       }
       return;
@@ -729,6 +745,11 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     renderer.sync(alpha, frameDt, movementFacing);
     // (re)load GLBs for placed world objects only when the mirrored set changed
     if (worldObjects && net.consumeWorldObjectsChanged()) worldObjects.reconcile(net);
+    // In build mode, the placement preview follows the cursor on the ground.
+    if (buildMode && worldObjects && input.hoverActive) {
+      const g = renderer.groundPoint(input.hoverX, input.hoverY, world.player.pos.y);
+      if (g) worldObjects.updatePreview(g.x, g.z, 0, buildScale);
+    }
     hud.update();
   }
   requestAnimationFrame(frame);

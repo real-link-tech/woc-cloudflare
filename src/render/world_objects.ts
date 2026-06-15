@@ -49,19 +49,88 @@ export class WorldObjectsLayer {
   // ids whose GLB is mid-flight, so a second reconcile pass before the load
   // resolves doesn't add a duplicate.
   private readonly pending = new Set<string>();
+  // Build-mode placement preview: a translucent ghost of the selected asset that
+  // follows the cursor on the ground (WoW/WC3-style building placement). Scale +
+  // rotation are previewed live before the click commits.
+  private preview: THREE.Object3D | null = null;
+  private previewUrl: string | null = null;
+  private previewToken = 0;
 
   constructor(private readonly scene: THREE.Scene, private readonly seed: number) {}
+
+  // Show a translucent preview of `glbUrl`. Idempotent for the same url. Position
+  // it with updatePreview(); remove it with clearPreview().
+  async setPreview(glbUrl: string): Promise<void> {
+    if (this.previewUrl === glbUrl && this.preview) return;
+    this.clearPreview();
+    this.previewUrl = glbUrl;
+    const token = ++this.previewToken;
+    try {
+      const gltf = await loadGlb(glbUrl);
+      if (token !== this.previewToken) return; // superseded by a newer selection
+      const ghost = gltf.scene.clone(true);
+      // Clone materials (the cache shares them across instances) and make them a
+      // translucent blue-tinted ghost. depthWrite off so it reads as a hologram.
+      ghost.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const ghostMat = (m: THREE.Material): THREE.Material => {
+          const c = m.clone();
+          const std = c as THREE.MeshStandardMaterial;
+          std.transparent = true;
+          std.opacity = 0.5;
+          std.depthWrite = false;
+          if (std.emissive) { std.emissive.setHex(0x2b6cff); std.emissiveIntensity = 0.4; }
+          return c;
+        };
+        mesh.material = Array.isArray(mesh.material) ? mesh.material.map(ghostMat) : ghostMat(mesh.material);
+      });
+      ghost.visible = false; // until first updatePreview positions it
+      this.preview = ghost;
+      this.scene.add(ghost);
+    } catch (err) {
+      console.warn('[world-objects] preview load failed', glbUrl, err);
+    }
+  }
+
+  // Move/scale/rotate the preview to a ground position.
+  updatePreview(x: number, z: number, rot: number, scale: number): void {
+    if (!this.preview) return;
+    this.preview.position.set(x, groundHeight(x, z, this.seed), z);
+    this.preview.rotation.y = rot;
+    this.preview.scale.setScalar(scale);
+    this.preview.visible = true;
+  }
+
+  clearPreview(): void {
+    this.previewToken++;
+    this.previewUrl = null;
+    if (this.preview) {
+      this.scene.remove(this.preview);
+      // dispose ONLY the cloned preview materials (geometry is shared with the cache).
+      this.preview.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (mesh.isMesh) {
+          const mat = mesh.material;
+          if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+          else mat?.dispose();
+        }
+      });
+      this.preview = null;
+    }
+  }
 
   // Diff the desired set (world.worldObjects) against what's currently in the
   // scene: load+add new ones, dispose removed ones. Async (GLB loads), but safe
   // to call repeatedly — pending-load guards prevent double-adds.
   reconcile(world: WorldObjectSource): void {
     const desired = world.worldObjects;
-    // Remove objects that are no longer present.
+    // Remove objects that are no longer present. We do NOT dispose geometry/
+    // materials — clone(true) shares them with the cached GLB and other live
+    // instances, so disposing here would break re-placing the same asset.
     for (const [id, group] of this.rendered) {
       if (!desired.has(id)) {
         this.scene.remove(group);
-        disposeObject(group);
         this.rendered.delete(id);
       }
     }
