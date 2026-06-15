@@ -49,6 +49,29 @@ function withinInterest(p: Entity, e: Entity): boolean {
   return dx * dx + dz * dz <= INTEREST_RADIUS_SQ;
 }
 
+// A player-placed IPIO library asset — the "build the world" feature. Persisted
+// per realm in ipio_woc_world_state under the 'world_objects' key (same mechanism
+// as the World Market), broadcast to all clients, and reloaded on DO restart.
+export interface WorldObject {
+  id: string;
+  ipAssetId: string;  // source IPIO asset id (reference/attribution)
+  glbUrl: string;     // the GLB to render (IPIO CDN / signed asset URL)
+  name: string;
+  x: number; y: number; z: number;
+  rot: number;        // yaw, radians
+  scale: number;
+  placedBy: string;   // placer's character name
+}
+
+const MAX_WORLD_OBJECTS = 500;
+// Only allow GLB URLs from IPIO's own asset hosts — a placed object's URL is
+// loaded by every client, so it must not be an arbitrary attacker-controlled URL.
+const ALLOWED_GLB_HOSTS = new Set(['assets.ipio.ai', 'api.ipio.ai', 'api-dev.ipio.ai']);
+function validGlbUrl(u: unknown): u is string {
+  if (typeof u !== 'string' || u.length > 1024) return false;
+  try { const url = new URL(u); return url.protocol === 'https:' && ALLOWED_GLB_HOSTS.has(url.hostname); } catch { return false; }
+}
+
 export class WorldRealmDurableObject {
   private readonly ctx: DurableObjectState;
   private readonly env: WorldEnv;
@@ -79,6 +102,13 @@ export class WorldRealmDurableObject {
   // path has a realm even if all conns have left.
   private marketLoaded = false;
   private marketRealm: string | null = null;
+
+  // Player-placed world objects (the build feature). Loaded once per sim lifetime
+  // from ipio_woc_world_state, kept in memory, persisted on change, broadcast to
+  // all clients, and re-sent in full to each newly-connected player.
+  private readonly worldObjects = new Map<string, WorldObject>();
+  private worldObjectsLoaded = false;
+  private worldObjectsRealm: string | null = null;
 
   constructor(ctx: DurableObjectState, env: WorldEnv) {
     this.ctx = ctx;
@@ -136,6 +166,19 @@ export class WorldRealmDurableObject {
       }
     }
 
+    // Player-placed world objects: load the realm's build once per sim lifetime,
+    // same world_state mechanism as the market.
+    if (!this.worldObjectsLoaded) {
+      this.worldObjectsLoaded = true;
+      this.worldObjectsRealm = realm;
+      try {
+        const stored = await db.loadWorldState<WorldObject[]>(realm, 'world_objects');
+        if (Array.isArray(stored)) for (const o of stored) this.worldObjects.set(o.id, o);
+      } catch (err) {
+        console.error('failed to load world objects:', err);
+      }
+    }
+
     let character;
     try {
       character = await db.getCharacter(userId, characterId, realm);
@@ -176,6 +219,10 @@ export class WorldRealmDurableObject {
       .catch((err) => console.error('failed to open play session:', err));
 
     this.sendJson(server, { t: 'hello', pid, seed: sim.cfg.seed, realm });
+    // Send the realm's existing build so the new player sees what others placed.
+    if (this.worldObjects.size > 0) {
+      this.sendJson(server, { t: 'world_objects', list: [...this.worldObjects.values()] });
+    }
 
     server.addEventListener('message', (event) => {
       const data = event.data;
@@ -296,6 +343,9 @@ export class WorldRealmDurableObject {
         case 'block_add': if (typeof msg.name === 'string') void this.social?.blockAdd(this.actorFor(conn), msg.name).catch(console.error); break;
         case 'block_remove': if (typeof msg.name === 'string') void this.social?.blockRemove(this.actorFor(conn), msg.name).catch(console.error); break;
         case 'social_refresh': void this.sendSocialSnapshot(conn.characterId); break;
+        // Build the world: place / remove an IPIO library asset.
+        case 'place_object': this.placeObject(conn, msg); break;
+        case 'remove_object': if (typeof msg.id === 'string') this.removeObject(msg.id); break;
         // guilds
         case 'guild_create': if (typeof msg.name === 'string') void this.social?.guildCreate(this.actorFor(conn), msg.name).catch(console.error); break;
         case 'guild_invite': if (typeof msg.name === 'string') void this.social?.guildInvite(this.actorFor(conn), msg.name).catch(console.error); break;
@@ -658,6 +708,9 @@ export class WorldRealmDurableObject {
       this.social = null;
       this.marketLoaded = false;
       this.marketRealm = null;
+      this.worldObjects.clear();
+      this.worldObjectsLoaded = false;
+      this.worldObjectsRealm = null;
       try { await this.ctx.storage.deleteAlarm(); } catch { /* noop */ }
     }
   }
@@ -854,5 +907,60 @@ export class WorldRealmDurableObject {
     } catch (err) {
       console.error('socket send failed:', err);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Build the world: place / remove / persist / broadcast world objects
+  // -------------------------------------------------------------------------
+
+  private placeObject(conn: Conn, msg: any): void {
+    if (!validGlbUrl(msg.glbUrl)) { this.sendErr(conn, 'That asset can’t be placed here.'); return; }
+    if (this.worldObjects.size >= MAX_WORLD_OBJECTS) { this.sendErr(conn, 'This realm’s build limit is full.'); return; }
+    const x = Number(msg.x), y = Number(msg.y ?? 0), z = Number(msg.z);
+    const rot = Number(msg.rot ?? 0), scale = Number(msg.scale ?? 1);
+    if (![x, y, z, rot, scale].every(Number.isFinite)) return;
+    if (Math.abs(x) > 2000 || Math.abs(z) > 2000 || Math.abs(y) > 500 || scale <= 0 || scale > 20) return;
+    const id = `wo_${conn.characterId}_${Date.now().toString(36)}_${this.worldObjects.size}`;
+    const obj: WorldObject = {
+      id,
+      ipAssetId: String(msg.ipAssetId ?? '').slice(0, 128),
+      glbUrl: msg.glbUrl,
+      name: String(msg.name ?? '').slice(0, 64),
+      x, y, z, rot, scale,
+      placedBy: conn.name,
+    };
+    this.worldObjects.set(id, obj);
+    this.broadcastJson({ t: 'world_object', op: 'add', obj });
+    void this.saveWorldObjects();
+  }
+
+  private removeObject(id: string): void {
+    if (this.worldObjects.delete(id)) {
+      this.broadcastJson({ t: 'world_object', op: 'remove', id });
+      void this.saveWorldObjects();
+    }
+  }
+
+  private async saveWorldObjects(): Promise<void> {
+    if (!this.db || !this.worldObjectsRealm) return;
+    try {
+      await this.db.saveWorldState(this.worldObjectsRealm, 'world_objects', [...this.worldObjects.values()]);
+    } catch (err) {
+      console.error('save world objects failed:', err);
+    }
+  }
+
+  // Broadcast one JSON message to every connected player.
+  private broadcastJson(payload: unknown): void {
+    const s = JSON.stringify(payload);
+    for (const conn of this.conns.values()) {
+      if (conn.socket.readyState === WebSocket.OPEN) {
+        try { conn.socket.send(s); } catch { /* socket closing */ }
+      }
+    }
+  }
+
+  private sendErr(conn: Conn, text: string): void {
+    this.sendJson(conn.socket, { t: 'events', list: [{ type: 'error', text }] });
   }
 }
