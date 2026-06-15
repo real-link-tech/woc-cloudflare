@@ -749,6 +749,11 @@ export class WorldRealmDurableObject {
         console.error('world market save failed:', err);
       }
     }
+    // Flush the player-built world too. Placements persist eagerly on each
+    // place/remove, but those writes are fire-and-forget — awaiting one here on
+    // teardown/autosave closes the window where a just-placed object could be
+    // lost if the DO is evicted before its async write lands.
+    await this.saveWorldObjects();
   }
 
   // -------------------------------------------------------------------------
