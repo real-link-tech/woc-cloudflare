@@ -10,7 +10,7 @@
 // computes them internally; the DO only feeds input and serializes snapshots.
 // Chat/party/trade/duel/social/market/quest/loadout commands are deferred to M2.
 import { Sim, type CharacterState } from '../sim/sim';
-import type { Entity, PlayerClass } from '../sim/types';
+import type { Entity, PlayerClass, SimEvent } from '../sim/types';
 import { DT } from '../sim/types';
 import { parseMoveInputFrame } from '../sim/move_input';
 import { createWocDb, type WocDb } from './db';
@@ -201,17 +201,42 @@ export class WorldRealmDurableObject {
       last = now;
       if (dt > 0.5) dt = 0.5;
       acc += dt;
+      // Capture the SimEvents each tick produces (melee swings, casts, hits,
+      // damage, loot, level-ups, …). Without forwarding these to clients the
+      // world looks frozen in combat — no attack animation, no floating damage,
+      // no spell VFX. Accumulate across all catch-up ticks, route once per frame.
+      const frameEvents: SimEvent[] = [];
       while (acc >= DT) {
-        sim.tick();
+        frameEvents.push(...sim.tick());
         acc -= DT;
       }
       this.broadcastSnapshots();
+      this.routeEvents(frameEvents);
       saveTimer += dt;
       if (saveTimer >= 30) {
         saveTimer = 0;
         void this.saveAll();
       }
     }, 50) as unknown as number;
+  }
+
+  // -------------------------------------------------------------------------
+  // Events: drive client-side combat feedback (attack/cast animations, damage
+  // numbers, VFX). World events (no pid) go to every connected player; events
+  // scoped to one player (ev.pid set, e.g. "you gained XP") only to its owner.
+  // Mirrors the original GameServer.routeEvents minus the interest-radius filter,
+  // which is fine for the small M1 world.
+  // -------------------------------------------------------------------------
+
+  private routeEvents(events: SimEvent[]): void {
+    if (events.length === 0) return;
+    for (const conn of this.conns.values()) {
+      if (conn.socket.readyState !== WebSocket.OPEN) continue;
+      const mine = events.filter((ev) => ev.pid === undefined || ev.pid === conn.pid);
+      if (mine.length > 0) {
+        try { conn.socket.send(JSON.stringify({ t: 'events', list: mine })); } catch { /* socket closing */ }
+      }
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -20,7 +20,7 @@ import { CLASSES, ABILITIES } from './sim/content/classes';
 import { iconDataUrl } from './ui/icons';
 import { hydrateIcons } from './ui/ui_icons';
 import { getLanguage, setLanguage, t, SupportedLanguage } from './ui/i18n';
-import { requireClerkSession } from './ui/clerk-gate';
+import { requireClerkSession, clerkSignOut } from './ui/clerk-gate';
 
 
 const WORLD_SEED = 20061; // fixed: World of Claudecraft is a persistent place
@@ -981,6 +981,9 @@ async function enterRealmFlow(): Promise<void> {
   const remembered = localStorage.getItem(LAST_REALM_KEY);
   const auto = dir.realms.find((r) => r.name === remembered);
   if (auto) { selectRealm(auto); return; }
+  // The Cloudflare worker hosts exactly one realm (Claudemoon); skip the picker
+  // and jump straight to its character list.
+  if (dir.realms.length === 1) { selectRealm(dir.realms[0]); return; }
   showRealmList(dir);
 }
 
@@ -1068,6 +1071,17 @@ function openDeleteCharacterDialog(character: CharacterSummary): void {
   input.focus();
 }
 
+// Character names are unique per realm and may only contain letters, spaces,
+// hyphens and apostrophes (no digits). Build a unique-enough default name from
+// random letters so the auto-seed survives a name collision with another
+// player's 'Hero'. Max 16 chars: 'Hero' + 11 letters.
+function generateUniqueHeroName(): string {
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  let suffix = '';
+  for (let i = 0; i < 11; i++) suffix += letters[Math.floor(Math.random() * letters.length)];
+  return `Hero${suffix}`;
+}
+
 async function refreshCharacters(): Promise<void> {
   const panel = $('#charselect-panel');
   panel.dataset.mobileTab = 'characters';
@@ -1081,14 +1095,22 @@ async function refreshCharacters(): Promise<void> {
   try {
     let chars = await api.characters();
     // A freshly-signed-in user with no character still needs to reach the world:
-    // seed a default Hero (warrior) and re-list so the rest of the flow (Enter
-    // World → play-token → WS) has a character to enter with.
+    // seed a default warrior and re-list so the rest of the flow (Enter World →
+    // play-token → WS) has a character to enter with. Character names are unique
+    // per realm, so 'Hero' alone collides once another player has taken it — try
+    // 'Hero' first for a clean default, then fall back to a unique letters-only
+    // name (the name rule forbids digits) on the taken-name conflict.
     if (chars.length === 0) {
       try {
         await api.createCharacter('Hero', 'warrior');
         chars = await api.characters();
       } catch {
-        // fall through with the empty list; the create-below UI still works
+        try {
+          await api.createCharacter(generateUniqueHeroName(), 'warrior');
+          chars = await api.characters();
+        } catch {
+          // fall through with the empty list; the create-below UI still works
+        }
       }
     }
     if (api.realm) $('#charselect-realm').textContent = `Realm: ${api.realm}`;
@@ -1211,6 +1233,7 @@ async function enterWorld(c: CharacterSummary, button?: HTMLButtonElement): Prom
     return;
   }
   const world = new ClientWorld(playToken, c.id, c.class, api.base);
+  (window as unknown as { __wocWorld?: unknown }).__wocWorld = world;
   // wait for hello + first snapshot so the world starts populated
   const waitStart = Date.now();
   const poll = setInterval(() => {
@@ -1658,9 +1681,9 @@ async function loadHighscores(): Promise<void> {
 }
 
 function wireStartScreens(): void {
-  // Initial page translation and stats load
+  // Initial page translation. (The legacy /api/project-stats endpoint does not
+  // exist on the Cloudflare worker, so the homepage stats panel is not loaded.)
   translatePage();
-  void loadProjectStats();
 
   // mode select
   const onlineBtn = $('#btn-online');
@@ -1669,7 +1692,11 @@ function wireStartScreens(): void {
   const offlineNameInput = $('#char-name') as HTMLInputElement;
   const offlineError = $('#offline-error');
   
-  const handleOnlineSelect = () => show('#login-panel');
+  // Auth is the shared IPIO Clerk session, established by the boot gate before
+  // any UI shows. The legacy username/password login-panel is dead on the
+  // Cloudflare worker (no /api/login), so go straight to the realm/character
+  // flow, which authenticates every request with the Clerk JWT.
+  const handleOnlineSelect = () => { void enterRealmFlow(); };
 
   const handleOfflineStart = (cls: PlayerClass) => {
     const rawName = offlineNameInput.value.trim();
@@ -2116,7 +2143,9 @@ function wireStartScreens(): void {
       charselectError.textContent = err.message;
     }
   });
-  $('#btn-charselect-back').addEventListener('click', () => show('#login-panel'));
+  // "Back" from character select means log out of the shared Clerk session
+  // (there is no WoC login panel to return to).
+  $('#btn-charselect-back').addEventListener('click', () => { void clerkSignOut(); });
 
   // Main Navigation View Switching
   const navBtnPlay = $('#nav-btn-play');
@@ -2202,9 +2231,9 @@ function wireStartScreens(): void {
   setupNavBtn(navBtnWiki, '#wiki-view');
   setupNavBtn(navBtnNews, '#news-view');
   setupNavBtn(navBtnDownload, '#download-view');
-  setupNavBtn(navBtnLogin, '#hero-view', () => {
-    show('#login-panel');
-  });
+  // No WoC username/password login — Clerk owns auth. Hide the legacy Login nav
+  // so it can't surface the dead username/password panel.
+  if (navBtnLogin) navBtnLogin.setAttribute('hidden', '');
 
   // Header Logo click listener to return to homepage
   const headerLogoBtn = $('#header-logo-btn');
@@ -2300,4 +2329,9 @@ void (async () => {
   const session = await requireClerkSession(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string);
   window.__wocClerkToken = session.getToken;
   wireStartScreens();
+  // The Clerk session IS the login (shared IPIO account). There is no WoC
+  // username/password and no marketing homepage to land on — go straight into
+  // the single-realm character flow, which authenticates every request with the
+  // Clerk JWT and lands the player on character select → world.
+  void enterRealmFlow();
 })();

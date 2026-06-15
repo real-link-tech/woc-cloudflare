@@ -69,17 +69,12 @@ export class Api {
     this.base = url || '';
   }
 
-  // The realm directory is always read from the page's own server. Sending the
-  // token (when logged in) also returns per-realm character counts.
+  // The Cloudflare worker hosts a single realm (Claudemoon) on the page's own
+  // origin; there is no realm-directory endpoint. Return a synthetic directory
+  // so the realm-list flow auto-selects Claudemoon and proceeds to characters.
   async realms(): Promise<RealmDirectory> {
-    try {
-      const res = await fetch('/api/realms', { headers: this.token ? { Authorization: `Bearer ${this.token}` } : {} });
-      if (!res.ok) return { current: '', realms: [], characters: {} };
-      const d = await res.json();
-      return { current: d.current ?? '', realms: d.realms ?? [], characters: d.characters ?? {} };
-    } catch {
-      return { current: '', realms: [], characters: {} };
-    }
+    const realm: RealmEntry = { name: 'Claudemoon', url: '', type: 'Normal' };
+    return { current: 'Claudemoon', realms: [realm], characters: {} };
   }
 
   // Live status for a realm (population + reachability), for the realm picker.
@@ -151,13 +146,13 @@ export class Api {
   }
 
   async characters(): Promise<CharacterSummary[]> {
-    const data = await this.get('/api/characters');
+    const data = await this.get('/api/woc/characters');
     if (typeof data.realm === 'string') this.realm = data.realm;
     return data.characters;
   }
 
   async createCharacter(name: string, cls: PlayerClass): Promise<void> {
-    await this.post('/api/characters', { name, class: cls });
+    await this.post('/api/woc/characters', { name, class: cls });
   }
 
   async renameCharacter(characterId: number, name: string): Promise<void> {
