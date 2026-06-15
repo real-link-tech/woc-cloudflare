@@ -24,14 +24,34 @@ export async function requireClerkSession(
   // token is ever issued.
   const noRedirect = new URLSearchParams(location.search).has('e2e_no_redirect');
   if (!clerk.user) {
-    if (noRedirect) {
-      await new Promise<void>((resolve) => {
-        const iv = setInterval(() => { if (clerk!.user) { clearInterval(iv); resolve(); } }, 200);
+    if (!noRedirect) {
+      // Render Clerk's sign-in/up IN OUR app (a clerk-js modal) instead of
+      // redirecting to Clerk's HOSTED Account Portal. That hosted Next.js page
+      // throws CSP errors (blob: images) and React hydration errors (#418/#423)
+      // in some browsers / with some extensions. The in-app component renders on
+      // our own origin under our own (permissive) CSP, so those errors go away
+      // and the user never leaves woc-dev.ipio.ai.
+      clerk.openSignIn({
+        afterSignInUrl: window.location.href,
+        afterSignUpUrl: window.location.href,
       });
-    } else {
-      await clerk.redirectToSignIn({ redirectUrl: window.location.href });
-      await new Promise<never>(() => {}); // never resolves; navigation is in flight
     }
+    // Resolve once a session exists — from the modal (normal users) or from
+    // Clerk testing tooling (the e2e_no_redirect path). On modal success Clerk
+    // also navigates to afterSignInUrl (a same-URL reload), which re-runs the
+    // gate already signed in; the poll covers the no-navigation case.
+    await new Promise<void>((resolve) => {
+      if (clerk!.user) return resolve();
+      const iv = setInterval(() => {
+        if (clerk!.user) { clearInterval(iv); resolve(); return; }
+        // No hosted-redirect fallback anymore, so if the user dismisses the modal
+        // without signing in, re-open it — the gate has nothing else to show.
+        if (!noRedirect && !document.querySelector('.cl-modalBackdrop')) {
+          clerk!.openSignIn({ afterSignInUrl: location.href, afterSignUpUrl: location.href });
+        }
+      }, 400);
+    });
+    try { clerk.closeSignIn(); } catch { /* modal may already be closed */ }
   }
   return {
     userId: clerk.user!.id,
