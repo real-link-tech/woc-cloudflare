@@ -504,9 +504,19 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   let buildAsset: BuildAsset | null = null;
   let buildScale = 1.5;
   let buildRot = 0;
+  let gridSnap = false;
   let selectedId: string | null = null;
   const BUILD_SCALE_MIN = 0.3, BUILD_SCALE_MAX = 12;
-  const BUILD_ROT_STEP = Math.PI / 12; // 15° per Q/E press
+  const BUILD_ROT_STEP = Math.PI / 4;  // 45° per rotate
+  const BUILD_GRID = 1;                // world units when grid snap is on
+  const snapXZ = (v: number) => (gridSnap ? Math.round(v / BUILD_GRID) * BUILD_GRID : v);
+  function rotateGhost(delta: number): void {
+    buildRot += delta;
+    // keep yaw in a tidy range; grid mode locks to 15° increments
+    if (gridSnap) buildRot = Math.round(buildRot / (Math.PI / 12)) * (Math.PI / 12);
+    buildRot = ((buildRot % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    refreshBuildUI();
+  }
 
   // The toolbar: a flex bar whose container ignores pointer events (so it never
   // eats build-area clicks); only its buttons capture clicks.
@@ -540,6 +550,11 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     buildBar.appendChild(tbBtn('🔍 Browse', () => hud.toggleBuildPalette()));
     buildBar.appendChild(tbBtn('Place', () => setBuildTool('place'), buildTool === 'place'));
     buildBar.appendChild(tbBtn('Select', () => setBuildTool('select'), buildTool === 'select'));
+    if (buildTool === 'place') {
+      buildBar.appendChild(tbBtn('↺', () => rotateGhost(-BUILD_ROT_STEP)));
+      buildBar.appendChild(tbBtn('↻', () => rotateGhost(BUILD_ROT_STEP)));
+    }
+    buildBar.appendChild(tbBtn(`Grid ${gridSnap ? 'on' : 'off'}`, () => { gridSnap = !gridSnap; refreshBuildUI(); }, gridSnap));
     if (buildTool === 'select' && selectedId) buildBar.appendChild(tbBtn('🗑 Delete', () => deleteSelected()));
     buildBar.appendChild(tbBtn('✕ Done', () => exitBuild()));
   }
@@ -630,8 +645,8 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
           ipAssetId: buildAsset.ipAssetId,
           glbUrl: buildAsset.glbUrl,
           name: buildAsset.name,
-          x: g.x,
-          z: g.z,
+          x: snapXZ(g.x),
+          z: snapXZ(g.z),
           rot: buildRot,
           scale: buildScale,
           hw: b?.hw, hd: b?.hd, cx: b?.cx, cz: b?.cz,
@@ -810,7 +825,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     // In Place tool, the placement ghost follows the cursor on the ground.
     if (buildActive && buildTool === 'place' && worldObjects && input.hoverActive) {
       const g = renderer.groundPoint(input.hoverX, input.hoverY, world.player.pos.y);
-      if (g) worldObjects.updatePreview(g.x, g.z, buildRot, buildScale);
+      if (g) worldObjects.updatePreview(snapXZ(g.x), snapXZ(g.z), buildRot, buildScale);
     }
     hud.update();
   }
@@ -826,18 +841,23 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     face(facing: unknown) { input.setControllerFacing(facing); },
     stop() { input.clearControllerMoveInput(); },
   };
-  // Delete key removes the selected object in Select tool.
+  // Build-mode keyboard: Del removes the selection; R rotates the placement ghost.
   window.addEventListener('keydown', (e) => {
-    if (!buildActive || buildTool !== 'select' || !selectedId) return;
-    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(); }
+    if (!buildActive) return;
+    if (buildTool === 'select' && selectedId && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault(); deleteSelected();
+    } else if (buildTool === 'place' && (e.key === 'r' || e.key === 'R')) {
+      e.preventDefault(); rotateGhost(e.shiftKey ? -BUILD_ROT_STEP : BUILD_ROT_STEP);
+    }
   });
 
   (window as any).__game = {
     sim: world, world, renderer, input, hud, online, controller, worldObjects, setBuildMode,
     // build controller surface (also used by e2e)
     build: {
-      enterPlace, exitBuild, setBuildTool, selectObject, deleteSelected,
-      state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, selectedId }),
+      enterPlace, exitBuild, setBuildTool, selectObject, deleteSelected, rotateGhost,
+      setGrid: (on: boolean) => { gridSnap = on; refreshBuildUI(); },
+      state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId }),
     },
   };
 }
