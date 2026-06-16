@@ -10,7 +10,7 @@ import { audio } from './game/audio';
 import { music } from './game/music';
 import { handlePickedEntity, hoverCursorKind } from './game/interactions';
 import { clickMoveStep, manualMovementOverrides } from './game/click_move';
-import { Api, ClientWorld, CharacterSummary } from './net/online';
+import { Api, ClientWorld, CharacterSummary, type WorldObject } from './net/online';
 import type { IWorld, LeaderboardEntry } from './world_api';
 import { formatXp } from './ui/xp_bar';
 import { assetsReady } from './render/assets/preload';
@@ -419,12 +419,16 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     },
     onClickPick: (x, y, button) => handlePick(x, y, button),
     onBuildWheel: (deltaSign) => {
-      if (!buildActive || buildTool !== 'place') return false;
-      // scroll up grows the preview, down shrinks it (multiplicative feels natural)
+      if (!buildActive) return false;
+      // scroll up grows, down shrinks (multiplicative feels natural)
       const factor = deltaSign < 0 ? 1.12 : 1 / 1.12;
-      buildScale = Math.min(BUILD_SCALE_MAX, Math.max(BUILD_SCALE_MIN, buildScale * factor));
-      refreshBuildUI();
-      return true;
+      if (buildTool === 'place') {
+        buildScale = Math.min(BUILD_SCALE_MAX, Math.max(BUILD_SCALE_MIN, buildScale * factor));
+        refreshBuildUI();
+        return true;
+      }
+      if (buildTool === 'select' && selectedId) { scaleSelected(factor); return true; }
+      return false;
     },
     canUseGameKeys: () => !hud.isModalOpen() && chatInput.style.display !== 'block',
   }, keybinds);
@@ -506,6 +510,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   let buildRot = 0;
   let gridSnap = false;
   let selectedId: string | null = null;
+  let grabbing = false;
   const BUILD_SCALE_MIN = 0.3, BUILD_SCALE_MAX = 12;
   const BUILD_ROT_STEP = Math.PI / 4;  // 45° per rotate
   const BUILD_GRID = 1;                // world units when grid snap is on
@@ -540,7 +545,9 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       if (buildActive && buildTool === 'place' && buildAsset) {
         hint.textContent = `Placing “${buildAsset.name}” — scroll: resize (${buildScale.toFixed(1)}×) · click: place · right-click/Esc: stop`;
       } else if (buildActive && buildTool === 'select') {
-        hint.textContent = selectedId ? 'Selected — Del: delete · click empty: deselect' : 'Select tool — click a placed object';
+        if (grabbing) hint.textContent = 'Moving — click to drop · scroll: resize · R: rotate';
+        else if (selectedId) hint.textContent = 'Selected — Move/↺↻/Duplicate/Delete · scroll: resize · R: rotate · click empty: deselect';
+        else hint.textContent = 'Select tool — click a placed object';
       } else {
         hint.textContent = '';
       }
@@ -555,19 +562,60 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       buildBar.appendChild(tbBtn('↻', () => rotateGhost(BUILD_ROT_STEP)));
     }
     buildBar.appendChild(tbBtn(`Grid ${gridSnap ? 'on' : 'off'}`, () => { gridSnap = !gridSnap; refreshBuildUI(); }, gridSnap));
-    if (buildTool === 'select' && selectedId) buildBar.appendChild(tbBtn('🗑 Delete', () => deleteSelected()));
+    if (buildTool === 'select' && selectedId) {
+      buildBar.appendChild(tbBtn(grabbing ? '✋ Drop' : '✋ Move', () => toggleGrab(), grabbing));
+      buildBar.appendChild(tbBtn('↺', () => rotateSelected(-BUILD_ROT_STEP)));
+      buildBar.appendChild(tbBtn('↻', () => rotateSelected(BUILD_ROT_STEP)));
+      buildBar.appendChild(tbBtn('⧉ Duplicate', () => duplicateSelected()));
+      buildBar.appendChild(tbBtn('🗑 Delete', () => deleteSelected()));
+    }
     buildBar.appendChild(tbBtn('✕ Done', () => exitBuild()));
   }
   function setBuildTool(tool: BuildTool): void {
     buildTool = tool;
+    grabbing = false;
     if (tool === 'place') { selectedId = null; if (buildAsset) void worldObjects?.setPreview(buildAsset.glbUrl); }
     else worldObjects?.clearPreview();
     refreshBuildUI();
   }
-  function selectObject(id: string | null): void { selectedId = id; refreshBuildUI(); }
+  function selectObject(id: string | null): void { selectedId = id; grabbing = false; refreshBuildUI(); }
   function deleteSelected(): void {
-    if (selectedId && online) { online.removeWorldObject(selectedId); selectedId = null; refreshBuildUI(); }
+    if (selectedId && online) { online.removeWorldObject(selectedId); selectedId = null; grabbing = false; refreshBuildUI(); }
   }
+  // The selected object's live record (server mirror), or null.
+  function selectedObj(): WorldObject | null {
+    return (selectedId && online?.worldObjects.get(selectedId)) || null;
+  }
+  // Optimistically apply a local transform change + tell the server. The render
+  // layer re-applies transforms from the mirror on reconcile, so this shows now.
+  function commitSelectedTransform(o: WorldObject): void {
+    if (!online || !worldObjects) return;
+    online.updateWorldObject({ id: o.id, x: o.x, z: o.z, rot: o.rot, scale: o.scale });
+    worldObjects.reconcile(online);
+    refreshBuildUI();
+  }
+  function rotateSelected(delta: number): void {
+    const o = selectedObj(); if (!o) return;
+    o.rot = ((((o.rot + delta) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2));
+    if (gridSnap) o.rot = Math.round(o.rot / (Math.PI / 12)) * (Math.PI / 12);
+    commitSelectedTransform(o);
+  }
+  function scaleSelected(factor: number): void {
+    const o = selectedObj(); if (!o) return;
+    o.scale = Math.min(BUILD_SCALE_MAX, Math.max(BUILD_SCALE_MIN, o.scale * factor));
+    commitSelectedTransform(o);
+  }
+  function duplicateSelected(): void {
+    const o = selectedObj(); if (!o || !online) return;
+    online.placeWorldObject({
+      ipAssetId: o.ipAssetId, glbUrl: o.glbUrl, name: o.name,
+      x: o.x + 2, z: o.z + 2, rot: o.rot, scale: o.scale,
+      hw: o.hw, hd: o.hd, cx: o.cx, cz: o.cz,
+    });
+  }
+  // Grab = the selected object follows the cursor on the ground until the next
+  // click drops it (WC3-style move). Avoids fighting the camera left-drag.
+  function toggleGrab(): void { if (selectedObj()) { grabbing = !grabbing; refreshBuildUI(); } }
   function enterPlace(asset: BuildAsset): void {
     buildActive = true; buildTool = 'place'; buildAsset = asset;
     buildScale = 1.5; buildRot = 0; selectedId = null;
@@ -576,7 +624,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     refreshBuildUI();
   }
   function exitBuild(): void {
-    buildActive = false; buildAsset = null; selectedId = null;
+    buildActive = false; buildAsset = null; selectedId = null; grabbing = false;
     worldObjects?.clearPreview();
     worldObjects?.setHighlight(new Set());
     refreshBuildUI();
@@ -633,6 +681,13 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     if (buildActive && online && worldObjects) {
       if (button !== 0) { exitBuild(); return; }
       if (buildTool === 'select') {
+        // While moving, a click drops the grabbed object at its current spot.
+        if (grabbing) {
+          const o = selectedObj();
+          if (o) { commitSelectedTransform(o); }
+          grabbing = false; refreshBuildUI();
+          return;
+        }
         const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
         selectObject(hitId); // null clears the selection
         return;
@@ -827,6 +882,12 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       const g = renderer.groundPoint(input.hoverX, input.hoverY, world.player.pos.y);
       if (g) worldObjects.updatePreview(snapXZ(g.x), snapXZ(g.z), buildRot, buildScale);
     }
+    // While grabbing in Select tool, the selected object follows the cursor.
+    if (buildActive && buildTool === 'select' && grabbing && worldObjects && input.hoverActive) {
+      const o = selectedObj();
+      const g = o ? renderer.groundPoint(input.hoverX, input.hoverY, world.player.pos.y) : null;
+      if (o && g) { o.x = snapXZ(g.x); o.z = snapXZ(g.z); worldObjects.reconcile(net); }
+    }
     hud.update();
   }
   requestAnimationFrame(frame);
@@ -841,13 +902,19 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     face(facing: unknown) { input.setControllerFacing(facing); },
     stop() { input.clearControllerMoveInput(); },
   };
-  // Build-mode keyboard: Del removes the selection; R rotates the placement ghost.
+  // Build-mode keyboard: R rotates (ghost in Place, selection in Select); Del
+  // removes the selection; G toggles grab/move on the selection.
   window.addEventListener('keydown', (e) => {
     if (!buildActive) return;
-    if (buildTool === 'select' && selectedId && (e.key === 'Delete' || e.key === 'Backspace')) {
+    const k = e.key.toLowerCase();
+    if (k === 'r') {
+      e.preventDefault();
+      const d = e.shiftKey ? -BUILD_ROT_STEP : BUILD_ROT_STEP;
+      if (buildTool === 'place') rotateGhost(d); else rotateSelected(d);
+    } else if (buildTool === 'select' && selectedId && (e.key === 'Delete' || e.key === 'Backspace')) {
       e.preventDefault(); deleteSelected();
-    } else if (buildTool === 'place' && (e.key === 'r' || e.key === 'R')) {
-      e.preventDefault(); rotateGhost(e.shiftKey ? -BUILD_ROT_STEP : BUILD_ROT_STEP);
+    } else if (buildTool === 'select' && selectedId && k === 'g') {
+      e.preventDefault(); toggleGrab();
     }
   });
 
@@ -856,8 +923,9 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     // build controller surface (also used by e2e)
     build: {
       enterPlace, exitBuild, setBuildTool, selectObject, deleteSelected, rotateGhost,
+      rotateSelected, scaleSelected, duplicateSelected, toggleGrab,
       setGrid: (on: boolean) => { gridSnap = on; refreshBuildUI(); },
-      state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId }),
+      state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId, grabbing }),
     },
   };
 }
