@@ -17,7 +17,7 @@ export interface InputCallbacks {
   onTab(): void;
   onAbility(slot: number): void;
   onUiKey(key: 'interact' | 'bags' | 'char' | 'spellbook' | 'talents' | 'questlog' | 'map' | 'nameplates' | 'escape' | 'chat' | 'meters' | 'social' | 'arena' | 'leaderboard' | 'build'): void;
-  onClickPick(x: number, y: number, button: number): void;
+  onClickPick(x: number, y: number, button: number, shift: boolean): void;
   /** Build mode: scroll resizes the placement preview. Return true to consume the
    *  wheel event (so it doesn't also zoom the camera). */
   onBuildWheel?: (deltaSign: number) => boolean;
@@ -266,7 +266,7 @@ export class Input {
     }
     const onCanvas = e.target === this.canvas || document.pointerLockElement === this.canvas;
     if (!wasDrag && e.button === this.downButton && onCanvas) {
-      this.cb.onClickPick(e.clientX, e.clientY, e.button);
+      this.cb.onClickPick(e.clientX, e.clientY, e.button, e.shiftKey);
     }
     this.downButton = -1;
     this.pointerLockRequestedForDrag = false;

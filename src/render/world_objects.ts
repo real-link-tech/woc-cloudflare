@@ -50,16 +50,22 @@ function loadGlb(url: string): Promise<GLTF> {
 // half-extents; cx/cz is the box centre offset from the model origin (so a model
 // whose origin isn't centred still boxes correctly). Populated on every load
 // (preview or spawn); read synchronously at place time via boundsFor().
-export interface ModelBounds { hw: number; hd: number; cx: number; cz: number; }
+// XZ half-extents (hw/hd) + XZ centre (cx/cz) drive the server collider. The
+// full local box (hy/cy too) drives the tight selection outline.
+export interface ModelBounds { hw: number; hd: number; hy: number; cx: number; cy: number; cz: number; }
 const boundsCache = new Map<string, ModelBounds>();
 function measureBounds(url: string, scene: THREE.Object3D): ModelBounds {
   let b = boundsCache.get(url);
   if (b) return b;
+  // scene is at identity here, so this is the model's LOCAL box.
   const box = new THREE.Box3().setFromObject(scene);
   const size = box.getSize(new THREE.Vector3());
   const ctr = box.getCenter(new THREE.Vector3());
   const fin = (n: number) => (Number.isFinite(n) ? n : 0); // guard empty/degenerate boxes
-  b = { hw: Math.max(0, fin(size.x) / 2), hd: Math.max(0, fin(size.z) / 2), cx: fin(ctr.x), cz: fin(ctr.z) };
+  b = {
+    hw: Math.max(0, fin(size.x) / 2), hd: Math.max(0, fin(size.z) / 2), hy: Math.max(0, fin(size.y) / 2),
+    cx: fin(ctr.x), cy: fin(ctr.y), cz: fin(ctr.z),
+  };
   boundsCache.set(url, b);
   return b;
 }
@@ -75,9 +81,10 @@ export class WorldObjectsLayer {
   private preview: THREE.Object3D | null = null;
   private previewUrl: string | null = null;
   private previewToken = 0;
-  // Selection highlight: a bright wireframe box per selected object. BoxHelpers
-  // wrap the rendered group's bounds without touching the GLB's shared materials.
-  private readonly highlights = new Map<string, THREE.BoxHelper>();
+  // Selection highlight: a bright wireframe box per selected object, parented to
+  // the object so it inherits rotation/scale and tightly bounds the mesh (an
+  // oriented box, not a loose world-AABB). Doesn't touch the GLB's materials.
+  private readonly highlights = new Map<string, THREE.LineSegments>();
 
   constructor(private readonly scene: THREE.Scene, private readonly seed: number) {}
 
@@ -156,8 +163,8 @@ export class WorldObjectsLayer {
       if (!desired.has(id)) {
         this.scene.remove(group);
         this.rendered.delete(id);
-        const helper = this.highlights.get(id);
-        if (helper) { this.scene.remove(helper); helper.geometry.dispose(); this.highlights.delete(id); }
+        const box = this.highlights.get(id);
+        if (box) { box.parent?.remove(box); box.geometry.dispose(); (box.material as THREE.Material).dispose(); this.highlights.delete(id); }
       }
     }
     // Add new objects (and aren't already loading); re-apply the transform of
@@ -176,16 +183,18 @@ export class WorldObjectsLayer {
     group.rotation.y = obj.rot;
     group.scale.setScalar(obj.scale);
     group.updateMatrixWorld(true);
-    this.highlights.get(obj.id)?.update(); // keep the selection box on a moved object
+    // the selection box is a child of the group, so it follows automatically.
   }
 
-  // Show a bright wireframe box around exactly the given object ids (selection).
-  // Idempotent; pass an empty set to clear.
+  // Show a tight wireframe box around exactly the given object ids (selection).
+  // The box is parented to the object and sized to the model's LOCAL bounds, so
+  // it hugs the mesh and rotates/scales with it. Idempotent; empty set clears.
   setHighlight(ids: Set<string>): void {
-    for (const [id, helper] of this.highlights) {
+    for (const [id, box] of this.highlights) {
       if (!ids.has(id) || !this.rendered.has(id)) {
-        this.scene.remove(helper);
-        helper.geometry.dispose();
+        box.parent?.remove(box);
+        box.geometry.dispose();
+        (box.material as THREE.Material).dispose();
         this.highlights.delete(id);
       }
     }
@@ -193,11 +202,19 @@ export class WorldObjectsLayer {
       if (this.highlights.has(id)) continue;
       const group = this.rendered.get(id);
       if (!group) continue;
-      const helper = new THREE.BoxHelper(group, 0xffe27a); // warm gold to match the look
-      (helper.material as THREE.LineBasicMaterial).depthTest = false;
-      helper.renderOrder = 999;
-      this.highlights.set(id, helper);
-      this.scene.add(helper);
+      const b = boundsCache.get(group.userData.glbUrl as string);
+      // BoxGeometry in the group's LOCAL space; parenting makes it inherit the
+      // object's yaw + scale → a tight oriented bound. Fall back to a unit box.
+      const w = b ? Math.max(b.hw * 2, 0.05) : 1;
+      const h = b ? Math.max(b.hy * 2, 0.05) : 1;
+      const d = b ? Math.max(b.hd * 2, 0.05) : 1;
+      const geom = new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d));
+      const mat = new THREE.LineBasicMaterial({ color: 0xffe27a, depthTest: false, transparent: true });
+      const box = new THREE.LineSegments(geom, mat);
+      if (b) box.position.set(b.cx, b.cy, b.cz); // recentre on the model's box centre
+      box.renderOrder = 999;
+      group.add(box); // parent to the object → inherits rotation + scale
+      this.highlights.set(id, box);
     }
   }
 
@@ -210,6 +227,7 @@ export class WorldObjectsLayer {
       const group = gltf.scene.clone(true);
       this.applyTransform(group, obj);
       group.userData.worldObjectId = obj.id;
+      group.userData.glbUrl = obj.glbUrl; // so setHighlight can size a tight box
       // Tag every descendant mesh too, so a build-mode raycast that hits a child
       // mesh can walk up to find the owning world-object id.
       group.traverse((child) => { child.userData.worldObjectId = obj.id; });
