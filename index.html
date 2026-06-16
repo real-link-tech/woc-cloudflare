@@ -784,10 +784,11 @@
   .build-recent img { width: 100%; height: 100%; object-fit: contain; }
   .build-recent span { font-family: var(--title-font); font-size: 12px; color: var(--gold); text-transform: capitalize; }
   /* Behavior device panel (right side, shown for a single selected object). */
-  #build-behavior { position: absolute; right: 14px; bottom: 132px; z-index: 31; pointer-events: auto;
-    display: none; width: 210px; padding: 10px; border-radius: 10px; background: #1a1410f0;
-    border: 1px solid var(--gold-dim); box-shadow: 0 4px 18px #000a; font-size: 12px; color: #cfc6a8; }
-  #build-behavior .bh-title { font-family: var(--title-font); color: var(--gold); margin-bottom: 6px; }
+  #build-behavior { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); z-index: 32; pointer-events: auto;
+    display: none; width: 220px; padding: 12px; border-radius: 10px; background: #1a1410f5;
+    border: 2px solid var(--gold); box-shadow: 0 0 0 1px #000, 0 6px 22px #000c, 0 0 16px #d4af3766; font-size: 12px; color: #cfc6a8; }
+  #build-behavior .bh-title { font-family: var(--title-font); color: var(--gold); font-size: 14px; margin-bottom: 8px;
+    border-bottom: 1px solid #463a1c; padding-bottom: 5px; }
   #build-behavior select, #build-behavior input { background: #221a10; color: #e7dcbf; border: 1px solid #463a1c;
     border-radius: 4px; padding: 3px 5px; font-size: 12px; }
   #build-behavior > select { width: 100%; margin-bottom: 6px; }

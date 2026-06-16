@@ -655,8 +655,9 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       } else if (buildActive && buildTool === 'select') {
         if (wiring) hint.textContent = '🔌 Wiring — click a signal SOURCE to feed it into the selected object · right-click: cancel';
         else if (grabbing) hint.textContent = 'Moving — click to drop · scroll: resize · R: rotate';
-        else if (selectedIds.size) hint.textContent = `${selectedIds.size>1?selectedIds.size+' selected':'Selected'} — Move/↺↻/Duplicate/Delete · scroll: resize · R: rotate · Shift-click: multi · click empty: deselect`;
-        else hint.textContent = 'Select tool — click a placed object';
+        else if (selectedIds.size === 1) hint.textContent = '⚙ Set this object’s Behavior in the panel on the RIGHT → (door/plate/button/turret…) · 🔌 Wire to connect · Move/↺↻/Duplicate/Delete';
+        else if (selectedIds.size) hint.textContent = `${selectedIds.size} selected — Move/↺↻/Duplicate/Delete · scroll: resize · click empty: deselect`;
+        else hint.textContent = 'Select tool — click a placed object to edit it (the ⚙ Behavior panel appears on the right)';
       } else {
         hint.textContent = '';
       }
