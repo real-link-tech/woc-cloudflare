@@ -569,6 +569,8 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       buildBar.appendChild(tbBtn('⧉ Duplicate', () => duplicateSelected()));
       buildBar.appendChild(tbBtn('🗑 Delete', () => deleteSelected()));
     }
+    if (undoStack.length) buildBar.appendChild(tbBtn('↶ Undo', () => void doUndo()));
+    if (redoStack.length) buildBar.appendChild(tbBtn('↷ Redo', () => void doRedo()));
     buildBar.appendChild(tbBtn('✕ Done', () => exitBuild()));
   }
   function setBuildTool(tool: BuildTool): void {
@@ -580,7 +582,16 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
   function selectObject(id: string | null): void { selectedId = id; grabbing = false; refreshBuildUI(); }
   function deleteSelected(): void {
-    if (selectedId && online) { online.removeWorldObject(selectedId); selectedId = null; grabbing = false; refreshBuildUI(); }
+    const o = selectedObj(); if (!o || !online) return;
+    const data = dataOf(o);
+    online.removeWorldObject(o.id);
+    selectedId = null; grabbing = false;
+    let cur: string | null = null;
+    pushUndo({
+      undo: async () => { cur = await placeAndCapture(data); },
+      redo: () => { if (cur && online) online.removeWorldObject(cur); cur = null; },
+    });
+    refreshBuildUI();
   }
   // The selected object's live record (server mirror), or null.
   function selectedObj(): WorldObject | null {
@@ -596,26 +607,91 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
   function rotateSelected(delta: number): void {
     const o = selectedObj(); if (!o) return;
+    const before = snapshot(o);
     o.rot = ((((o.rot + delta) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2));
     if (gridSnap) o.rot = Math.round(o.rot / (Math.PI / 12)) * (Math.PI / 12);
     commitSelectedTransform(o);
+    pushTransformUndo(o.id, before, snapshot(o));
   }
   function scaleSelected(factor: number): void {
     const o = selectedObj(); if (!o) return;
+    const before = snapshot(o);
     o.scale = Math.min(BUILD_SCALE_MAX, Math.max(BUILD_SCALE_MIN, o.scale * factor));
     commitSelectedTransform(o);
+    pushTransformUndo(o.id, before, snapshot(o));
   }
   function duplicateSelected(): void {
-    const o = selectedObj(); if (!o || !online) return;
-    online.placeWorldObject({
-      ipAssetId: o.ipAssetId, glbUrl: o.glbUrl, name: o.name,
-      x: o.x + 2, z: o.z + 2, rot: o.rot, scale: o.scale,
-      hw: o.hw, hd: o.hd, cx: o.cx, cz: o.cz,
-    });
+    const o = selectedObj(); if (!o) return;
+    void placeTracked({ ...dataOf(o), x: o.x + 2, z: o.z + 2 });
   }
   // Grab = the selected object follows the cursor on the ground until the next
   // click drops it (WC3-style move). Avoids fighting the camera left-drag.
-  function toggleGrab(): void { if (selectedObj()) { grabbing = !grabbing; refreshBuildUI(); } }
+  function toggleGrab(): void {
+    if (!selectedObj()) return;
+    if (!grabbing) grabBefore = snapshot(selectedObj()!); // remember start for undo
+    grabbing = !grabbing;
+    refreshBuildUI();
+  }
+
+  // ---- Undo/redo + clipboard (Phase 4) ------------------------------------
+  type Xform = { x: number; y: number; z: number; rot: number; scale: number };
+  type ObjData = Omit<WorldObject, 'id' | 'placedBy' | 'ownerId'>;
+  interface UndoEntry { undo: () => void | Promise<void>; redo: () => void | Promise<void>; }
+  const undoStack: UndoEntry[] = [];
+  const redoStack: UndoEntry[] = [];
+  let clipboard: ObjData | null = null;
+  let grabBefore: Xform | null = null;
+  const snapshot = (o: WorldObject): Xform => ({ x: o.x, y: o.y, z: o.z, rot: o.rot, scale: o.scale });
+  const dataOf = (o: WorldObject): ObjData => ({
+    ipAssetId: o.ipAssetId, glbUrl: o.glbUrl, name: o.name,
+    x: o.x, y: o.y, z: o.z, rot: o.rot, scale: o.scale,
+    hw: o.hw, hd: o.hd, cx: o.cx, cz: o.cz, footprint: o.footprint,
+  });
+  function pushUndo(e: UndoEntry): void { undoStack.push(e); if (undoStack.length > 60) undoStack.shift(); redoStack.length = 0; refreshBuildUI(); }
+  async function doUndo(): Promise<void> { const e = undoStack.pop(); if (!e) return; await e.undo(); redoStack.push(e); refreshBuildUI(); }
+  async function doRedo(): Promise<void> { const e = redoStack.pop(); if (!e) return; await e.redo(); undoStack.push(e); refreshBuildUI(); }
+  // Place + resolve the server-assigned id (place is fire-and-forget; the id
+  // arrives via the op:'add' broadcast). Returns null if it never shows.
+  async function placeAndCapture(data: ObjData): Promise<string | null> {
+    if (!online) return null;
+    const before = new Set(online.worldObjects.keys());
+    online.placeWorldObject(data);
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      const nw = [...online.worldObjects.keys()].find((k) => !before.has(k));
+      if (nw) return nw;
+    }
+    return null;
+  }
+  // Place an object and record an undo entry (a mutable cursor id keeps undo/redo
+  // consistent as re-placement assigns fresh ids).
+  async function placeTracked(data: ObjData): Promise<string | null> {
+    const id = await placeAndCapture(data);
+    if (!id) return null;
+    let cur: string | null = id;
+    pushUndo({
+      undo: () => { if (cur && online) online.removeWorldObject(cur); cur = null; },
+      redo: async () => { cur = await placeAndCapture(data); },
+    });
+    return id;
+  }
+  function applyXform(id: string, t: Xform): void {
+    const o = online?.worldObjects.get(id); if (!o || !online || !worldObjects) return;
+    o.x = t.x; o.y = t.y; o.z = t.z; o.rot = t.rot; o.scale = t.scale;
+    online.updateWorldObject({ id, x: t.x, y: t.y, z: t.z, rot: t.rot, scale: t.scale });
+    worldObjects.reconcile(online); refreshBuildUI();
+  }
+  function pushTransformUndo(id: string, before: Xform, after: Xform): void {
+    pushUndo({ undo: () => applyXform(id, before), redo: () => applyXform(id, after) });
+  }
+  function copySelected(): void { const o = selectedObj(); if (o) clipboard = dataOf(o); }
+  function paste(): void {
+    if (!clipboard) return;
+    const g = input.hoverActive ? renderer.groundPoint(input.hoverX, input.hoverY, world.player.pos.y) : null;
+    const x = g ? snapXZ(g.x) : clipboard.x + 2;
+    const z = g ? snapXZ(g.z) : clipboard.z + 2;
+    void placeTracked({ ...clipboard, x, z });
+  }
   function enterPlace(asset: BuildAsset): void {
     buildActive = true; buildTool = 'place'; buildAsset = asset;
     buildScale = 1.5; buildRot = 0; selectedId = null;
@@ -684,8 +760,8 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
         // While moving, a click drops the grabbed object at its current spot.
         if (grabbing) {
           const o = selectedObj();
-          if (o) { commitSelectedTransform(o); }
-          grabbing = false; refreshBuildUI();
+          if (o) { commitSelectedTransform(o); if (grabBefore) pushTransformUndo(o.id, grabBefore, snapshot(o)); }
+          grabbing = false; grabBefore = null; refreshBuildUI();
           return;
         }
         const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
@@ -696,11 +772,12 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       const g = renderer.groundPoint(x, y, world.player.pos.y);
       if (g && buildAsset) {
         const b = worldObjects.boundsFor(buildAsset.glbUrl);
-        online.placeWorldObject({
+        void placeTracked({
           ipAssetId: buildAsset.ipAssetId,
           glbUrl: buildAsset.glbUrl,
           name: buildAsset.name,
           x: snapXZ(g.x),
+          y: 0,
           z: snapXZ(g.z),
           rot: buildRot,
           scale: buildScale,
@@ -907,6 +984,11 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   window.addEventListener('keydown', (e) => {
     if (!buildActive) return;
     const k = e.key.toLowerCase();
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && k === 'z') { e.preventDefault(); if (e.shiftKey) void doRedo(); else void doUndo(); return; }
+    if (ctrl && k === 'y') { e.preventDefault(); void doRedo(); return; }
+    if (ctrl && k === 'c') { e.preventDefault(); copySelected(); return; }
+    if (ctrl && k === 'v') { e.preventDefault(); paste(); return; }
     if (k === 'r') {
       e.preventDefault();
       const d = e.shiftKey ? -BUILD_ROT_STEP : BUILD_ROT_STEP;
@@ -924,8 +1006,9 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     build: {
       enterPlace, exitBuild, setBuildTool, selectObject, deleteSelected, rotateGhost,
       rotateSelected, scaleSelected, duplicateSelected, toggleGrab,
+      undo: doUndo, redo: doRedo, copySelected, paste,
       setGrid: (on: boolean) => { gridSnap = on; refreshBuildUI(); },
-      state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId, grabbing }),
+      state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId, grabbing, undoDepth: undoStack.length, redoDepth: redoStack.length }),
     },
   };
 }
