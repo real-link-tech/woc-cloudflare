@@ -242,6 +242,51 @@ export class WorldObjectsLayer {
     }
   }
 
+  // ---- Destruction debris VFX ---------------------------------------------
+  private readonly debris: { obj: THREE.Mesh; v: THREE.Vector3; rv: THREE.Vector3; life: number; mat: THREE.MeshLambertMaterial }[] = [];
+  private readonly debrisGeom = new THREE.BoxGeometry(1, 1, 1);
+  private static readonly DEBRIS_COLORS = [0xa89878, 0x8a7a5a, 0xb8a888, 0x6f5f45];
+
+  // Burst of tumbling chunks when a structure is destroyed (scales with size).
+  spawnDebris(p: { x: number; y: number; z: number; scale: number }): void {
+    const baseY = groundHeight(p.x, p.z, this.seed) + p.y;
+    const n = Math.min(26, 10 + Math.floor(p.scale * 2.5));
+    const size = 0.18 * Math.max(0.5, p.scale);
+    for (let i = 0; i < n; i++) {
+      const color = WorldObjectsLayer.DEBRIS_COLORS[i % WorldObjectsLayer.DEBRIS_COLORS.length];
+      const mat = new THREE.MeshLambertMaterial({ color });
+      const m = new THREE.Mesh(this.debrisGeom, mat);
+      m.scale.setScalar(size * (0.6 + Math.random() * 0.9));
+      m.position.set(p.x + (Math.random() - 0.5) * 0.6 * p.scale, baseY + 0.4 * p.scale, p.z + (Math.random() - 0.5) * 0.6 * p.scale);
+      const ang = Math.random() * Math.PI * 2, spd = 2 + Math.random() * 3.5;
+      this.debris.push({
+        obj: m, mat,
+        v: new THREE.Vector3(Math.cos(ang) * spd, 3.5 + Math.random() * 3.5, Math.sin(ang) * spd),
+        rv: new THREE.Vector3((Math.random() - 0.5) * 9, (Math.random() - 0.5) * 9, (Math.random() - 0.5) * 9),
+        life: 0.9 + Math.random() * 0.5,
+      });
+      this.scene.add(m);
+    }
+  }
+
+  // Advance the debris simulation. Call once per frame from the render loop.
+  update(dt: number): void {
+    if (!this.debris.length) return;
+    const step = Math.min(dt, 0.05);
+    for (let i = this.debris.length - 1; i >= 0; i--) {
+      const d = this.debris[i];
+      d.life -= dt;
+      if (d.life <= 0) { this.scene.remove(d.obj); d.mat.dispose(); this.debris.splice(i, 1); continue; }
+      d.v.y -= 18 * step; // gravity
+      d.obj.position.addScaledVector(d.v, step);
+      const gy = groundHeight(d.obj.position.x, d.obj.position.z, this.seed);
+      if (d.obj.position.y < gy + 0.05) { d.obj.position.y = gy + 0.05; d.v.y *= -0.35; d.v.x *= 0.55; d.v.z *= 0.55; } // bounce
+      d.obj.rotation.x += d.rv.x * step; d.obj.rotation.y += d.rv.y * step; d.obj.rotation.z += d.rv.z * step;
+      const fade = Math.min(1, d.life / 0.4); // fade out in the last 0.4s
+      d.mat.opacity = fade; d.mat.transparent = fade < 1;
+    }
+  }
+
   // The currently-rendered object groups, for build-mode delete raycasting.
   objects(): THREE.Object3D[] {
     return [...this.rendered.values()];

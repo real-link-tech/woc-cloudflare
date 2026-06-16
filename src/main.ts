@@ -877,6 +877,19 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       }
       return;
     }
+    // Outside build mode: a click on a placed object attacks it — target its
+    // (invisible) structure hitbox and start auto-attacking. Structures have no
+    // entity mesh, so renderer.pick can't hit them; raycast the GLBs instead.
+    if (online && worldObjects && button === 0) {
+      const woId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
+      if (woId) {
+        let sid: number | null = null;
+        for (const e of world.entities.values()) {
+          if (e.kind === 'structure' && e.structureId === woId) { sid = e.id; break; }
+        }
+        if (sid !== null) { world.targetEntity(sid); world.startAutoAttack(); return; }
+      }
+    }
     const id = renderer.pick(x, y);
     const clickToMove = settings.get('clickToMove') > 0 && !world.player.dead;
     if (id === null) {
@@ -1045,6 +1058,10 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     renderer.sync(alpha, frameDt, movementFacing);
     // (re)load GLBs for placed world objects only when the mirrored set changed
     if (worldObjects && net.consumeWorldObjectsChanged()) worldObjects.reconcile(net);
+    if (worldObjects) {
+      for (const fx of net.consumeDestroyedFx()) worldObjects.spawnDebris(fx); // destruction debris
+      worldObjects.update(frameDt);
+    }
     // In Place tool, the placement ghost follows the cursor on the ground.
     if (buildActive && buildTool === 'place' && worldObjects && input.hoverActive) {
       const g = renderer.groundPoint(input.hoverX, input.hoverY, world.player.pos.y);

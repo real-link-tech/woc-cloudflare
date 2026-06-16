@@ -7,7 +7,7 @@ import {
 import { ARENA_SPAWN_A, ARENA_SPAWN_B } from './dungeon_layout';
 import { resolvePosition } from './colliders';
 import { findPath } from './pathfind';
-import { createGroundObject, createMob, createNpc, createPlayer, recalcPlayerStats, PlayerEquipment } from './entity';
+import { createGroundObject, createMob, createNpc, createPlayer, createStructure, recalcPlayerStats, PlayerEquipment } from './entity';
 import {
   computeTalentModifiers, emptyAllocation, emptyModifiers, talentsFor, talentPointsAtLevel,
   validateAllocation, cloneAllocation, pointsSpent, FIRST_TALENT_LEVEL, MAX_LOADOUTS,
@@ -497,6 +497,47 @@ export class Sim {
   private rebucket(e: Entity): void {
     this.grid.update(e);
     if (e.kind === 'player') this.playerGrid.update(e);
+  }
+
+  // -------------------------------------------------------------------------
+  // Destructible structures (player-built objects, bridged from the realm DO).
+  // Each placed WorldObject gets an invisible combat hitbox here; the GLB is
+  // still rendered client-side. structureId is the WorldObject id.
+  // -------------------------------------------------------------------------
+  private structureEntities = new Map<string, number>();
+
+  addStructure(structureId: string, pos: Vec3, maxHp: number, name: string): number {
+    const existing = this.structureEntities.get(structureId);
+    if (existing !== undefined) return existing; // idempotent on reload
+    const e = createStructure(this.nextId++, structureId, this.groundPos(pos.x, pos.z), maxHp, name);
+    this.addEntity(e);
+    this.structureEntities.set(structureId, e.id);
+    return e.id;
+  }
+
+  moveStructure(structureId: string, pos: Vec3): void {
+    const id = this.structureEntities.get(structureId);
+    const e = id !== undefined ? this.entities.get(id) : undefined;
+    if (!e) return;
+    e.pos = this.groundPos(pos.x, pos.z);
+    e.prevPos = { ...e.pos };
+    this.rebucket(e);
+  }
+
+  removeStructure(structureId: string): void {
+    const id = this.structureEntities.get(structureId);
+    if (id === undefined) return;
+    // anyone aiming at it stops attacking
+    for (const p of this.entities.values()) {
+      if (p.targetId === id) { p.targetId = null; p.autoAttack = false; }
+    }
+    this.dropEntity(id);
+    this.structureEntities.delete(structureId);
+  }
+
+  // The WorldObject id of a (dead) structure entity, for the DO's death handler.
+  structureIdOf(entityId: number): string | null {
+    return this.entities.get(entityId)?.structureId ?? null;
   }
 
   // -------------------------------------------------------------------------
@@ -2581,6 +2622,11 @@ export class Sim {
     e.castingAbility = null;
     this.emit({ type: 'death', entityId: e.id, killerId: killer?.id ?? -1 });
 
+    // A destroyed structure: the DO sees this 'death' event, removes the
+    // WorldObject (visual + collider + persistence) and broadcasts the debris.
+    // Nothing else here applies (no loot, corpse, hate tables, respawn).
+    if (e.kind === 'structure') return;
+
     // a dead mob keeps no raid marker — respawnMob reuses the same entity id,
     // so a stale mark would otherwise reappear on the respawn
     if (e.kind === 'mob') this.clearEntityMarker(e.id);
@@ -4091,6 +4137,9 @@ export class Sim {
   // -------------------------------------------------------------------------
 
   isHostileTo(attacker: Entity, target: Entity): boolean {
+    // Player-built structures are neutral but destructible — any player may attack
+    // them (combat is not gated by build-ownership; ownership only gates editing).
+    if (target.kind === 'structure') return attacker.kind === 'player';
     if (target.kind === 'mob') return target.hostile;
     if (target.kind === 'player' && attacker.kind === 'player') {
       const duel = this.duels.get(attacker.id);

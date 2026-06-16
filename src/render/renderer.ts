@@ -440,6 +440,9 @@ export class Renderer {
   private sparkleMat: THREE.SpriteMaterial | null = null;
 
   private createView(e: Entity): void {
+    // structures are invisible combat hitboxes — the player-built GLB (rendered
+    // by WorldObjectsLayer) is the visual. No entity view/model/nameplate.
+    if (e.kind === 'structure') return;
     const group = new THREE.Group();
     let visual: CharacterVisual | null = null;
     let body: THREE.Group | null = null; // object views build meshes into this
@@ -766,6 +769,7 @@ export class Renderer {
     // dynamic worlds: create views for newcomers, drop views for leavers
     // (doomed ids collected into a reused scratch array — no per-frame alloc)
     for (const e of sim.entities.values()) {
+      if (e.kind === 'structure') continue; // no view for invisible hitboxes
       if (!this.views.has(e.id)) this.createView(e);
     }
     this.doomedIds.length = 0;
@@ -907,8 +911,11 @@ export class Renderer {
     // selection ring
     const target = p.targetId !== null ? sim.entities.get(p.targetId) : null;
     if (target) {
-      const tv = this.views.get(target.id)!;
-      this.selectionRing.position.copy(tv.group.position);
+      // structures have no entity view (the GLB is their visual) — anchor the
+      // ring at the entity position instead of a (missing) view group.
+      const tv = this.views.get(target.id);
+      if (tv) this.selectionRing.position.copy(tv.group.position);
+      else this.selectionRing.position.set(target.pos.x, target.pos.y, target.pos.z);
       this.selectionRing.position.y += 0.08;
       this.selectionRing.scale.setScalar(target.scale);
       const ringMat = this.selectionRing.material as THREE.MeshBasicMaterial;

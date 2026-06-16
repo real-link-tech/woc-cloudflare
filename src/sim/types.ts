@@ -27,7 +27,7 @@ export interface Vec3 {
   z: number;
 }
 
-export type EntityKind = 'player' | 'mob' | 'npc' | 'object';
+export type EntityKind = 'player' | 'mob' | 'npc' | 'object' | 'structure';
 
 export type AiState = 'idle' | 'chase' | 'attack' | 'evade' | 'dead';
 
@@ -422,6 +422,8 @@ export interface Entity {
   dodgeChance: number;
   moveSpeed: number;
   hostile: boolean;
+  // for kind 'structure': the player-built WorldObject id this hitbox represents
+  structureId: string | null;
   // combat
   targetId: number | null;
   autoAttack: boolean;

@@ -18,6 +18,7 @@ export function identityFields(e: Entity): Record<string, unknown> {
   if (e.dungeonId) out.dgn = e.dungeonId;
   if (e.scale !== 1) out.sc = e.scale;
   if (e.color !== 0xffffff) out.c = e.color;
+  if (e.kind === 'structure' && e.structureId) out.sid = e.structureId;
   return out;
 }
 

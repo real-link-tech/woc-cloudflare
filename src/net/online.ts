@@ -240,6 +240,7 @@ function blankEntity(id: number): Entity {
     stats: { str: 0, agi: 0, sta: 0, int: 0, spi: 0, armor: 0 },
     weapon: { min: 1, max: 2, speed: 2 },
     attackPower: 0, rangedPower: 0, critChance: 0.05, dodgeChance: 0.05, moveSpeed: 7, hostile: false,
+    structureId: null,
     targetId: null, autoAttack: false, swingTimer: 0,
     inCombat: false, combatTimer: 99,
     auras: [], ccDr: new Map(), castingAbility: null, castRemaining: 0, castTotal: 0,
@@ -525,6 +526,10 @@ export class ClientWorld implements IWorld {
     if (msg.t === 'world_object') {
       if ((msg.op === 'add' || msg.op === 'update') && msg.obj) this.worldObjects.set(msg.obj.id, msg.obj as WorldObject);
       else if (msg.op === 'remove' && typeof msg.id === 'string') this.worldObjects.delete(msg.id);
+      else if (msg.op === 'destroyed' && typeof msg.id === 'string') {
+        this.worldObjects.delete(msg.id);
+        this.destroyedFx.push({ x: msg.x, y: msg.y ?? 0, z: msg.z, scale: msg.scale ?? 1 }); // debris burst
+      }
       this.worldObjectsDirty = true;
       return;
     }
@@ -543,6 +548,15 @@ export class ClientWorld implements IWorld {
     const v = this.worldObjectsDirty;
     this.worldObjectsDirty = false;
     return v;
+  }
+
+  // Positions of structures destroyed since the last frame, for the debris VFX.
+  private destroyedFx: { x: number; y: number; z: number; scale: number }[] = [];
+  consumeDestroyedFx(): { x: number; y: number; z: number; scale: number }[] {
+    if (!this.destroyedFx.length) return [];
+    const a = this.destroyedFx;
+    this.destroyedFx = [];
+    return a;
   }
 
   // Place an IPIO library asset into the world at a ground position.
@@ -606,6 +620,7 @@ export class ClientWorld implements IWorld {
         e.scale = w.sc ?? 1;
         e.color = w.c ?? 0xffffff;
         e.dungeonId = w.dgn ?? null;
+        e.structureId = w.sid ?? null;
         if (e.kind === 'npc') {
           const def = NPCS[e.templateId];
           e.questIds = def ? [...def.questIds] : [];

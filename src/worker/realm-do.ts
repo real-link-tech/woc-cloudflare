@@ -185,6 +185,8 @@ export class WorldRealmDurableObject {
         console.error('failed to load world objects:', err);
       }
       this.syncWorldObjectColliders();
+      // spawn a destructible combat hitbox for each loaded build object
+      for (const o of this.worldObjects.values()) this.addStructureFor(o);
     }
 
     let character;
@@ -491,6 +493,7 @@ export class WorldRealmDurableObject {
         }
         this.broadcastSnapshots();
         this.routeEvents(frameEvents);
+        this.handleStructureDeaths(frameEvents);
         // Cheap (no-DB) ~1 Hz push of friends'/guildmates' live positions.
         socialPosTimer += dt;
         if (socialPosTimer >= 1) {
@@ -956,6 +959,7 @@ export class WorldRealmDurableObject {
     };
     this.worldObjects.set(id, obj);
     this.syncWorldObjectColliders();
+    this.addStructureFor(obj); // destructible combat hitbox
     this.broadcastJson({ t: 'world_object', op: 'add', obj });
     void this.saveWorldObjects();
   }
@@ -971,9 +975,32 @@ export class WorldRealmDurableObject {
     if (!obj) return;
     if (!this.canEditObject(conn, obj)) { this.sendErr(conn, 'You can only remove what you placed.'); return; }
     this.worldObjects.delete(id);
+    this.sim?.removeStructure(id);
     this.syncWorldObjectColliders();
     this.broadcastJson({ t: 'world_object', op: 'remove', id });
     void this.saveWorldObjects();
+  }
+
+  // Combat destruction (hp→0): remove the build object without the edit-permission
+  // gate, and tell clients to play the debris effect (op:'destroyed').
+  private destroyObject(id: string): void {
+    const obj = this.worldObjects.get(id);
+    if (!obj) return;
+    this.worldObjects.delete(id);
+    this.sim?.removeStructure(id);
+    this.syncWorldObjectColliders();
+    this.broadcastJson({ t: 'world_object', op: 'destroyed', id, x: obj.x, y: obj.y, z: obj.z, scale: obj.scale });
+    void this.saveWorldObjects();
+  }
+
+  // Drain structure deaths from this frame's events → destroy the build objects.
+  private handleStructureDeaths(events: SimEvent[]): void {
+    if (!this.sim) return;
+    for (const ev of events) {
+      if (ev.type !== 'death') continue;
+      const sid = this.sim.structureIdOf(ev.entityId);
+      if (sid) this.destroyObject(sid);
+    }
   }
 
   // Move / rotate / rescale an existing object. Bounds (hw/hd/cx/cz) and owner
@@ -988,9 +1015,17 @@ export class WorldRealmDurableObject {
     if (![x, y, z, rot, scale].every(Number.isFinite)) return;
     if (Math.abs(x) > 2000 || Math.abs(z) > 2000 || Math.abs(y) > 500 || scale <= 0 || scale > 20) return;
     obj.x = x; obj.y = y; obj.z = z; obj.rot = rot; obj.scale = scale;
+    this.sim?.moveStructure(obj.id, { x, y, z });
     this.syncWorldObjectColliders();
     this.broadcastJson({ t: 'world_object', op: 'update', obj });
     void this.saveWorldObjects();
+  }
+
+  // Spawn the destructible combat hitbox for a build object (HP scales with size).
+  private addStructureFor(o: WorldObject): void {
+    if (!this.sim) return;
+    const maxHp = Math.max(30, Math.min(1500, Math.round(60 * o.scale)));
+    this.sim.addStructure(o.id, { x: o.x, y: o.y, z: o.z }, maxHp, o.name || 'Structure');
   }
 
   // Feed the current player-placed build into the sim's collision system so the

@@ -11,6 +11,7 @@ function baseEntity(id: number, pos: Vec3): Entity {
     stats: { str: 0, agi: 0, sta: 0, int: 0, spi: 0, armor: 0 },
     weapon: { min: 1, max: 2, speed: 2 },
     attackPower: 0, rangedPower: 0, critChance: 0.05, dodgeChance: 0.05, moveSpeed: 7, hostile: false,
+    structureId: null,
     targetId: null, autoAttack: false, swingTimer: 0,
     inCombat: false, combatTimer: 99,
     auras: [], ccDr: new Map(), castingAbility: null, castRemaining: 0, castTotal: 0,
@@ -26,6 +27,21 @@ function baseEntity(id: number, pos: Vec3): Entity {
     xpValue: 0, questIds: [], vendorItems: [], objectItemId: null, dungeonId: null,
     dead: false, scale: 1, color: 0xffffff,
   };
+}
+
+// A destructible player-built structure: an invisible combat hitbox co-located
+// with the rendered GLB. Neutral (not hostile), non-moving, attackable by anyone.
+export function createStructure(id: number, structureId: string, pos: Vec3, maxHp: number, name: string): Entity {
+  const e = baseEntity(id, pos);
+  e.kind = 'structure';
+  e.structureId = structureId;
+  e.name = name || 'Structure';
+  e.maxHp = Math.max(1, Math.round(maxHp));
+  e.hp = e.maxHp;
+  e.hostile = false;
+  e.moveSpeed = 0;
+  e.aiState = 'idle';
+  return e;
 }
 
 export function createPlayer(id: number, cls: PlayerClass, pos: Vec3, name: string): Entity {
