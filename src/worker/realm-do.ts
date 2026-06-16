@@ -73,10 +73,11 @@ export interface WorldObject {
 
 // A no-code device wired to others by signals. `inputs` are the WorldObject ids
 // whose output signal feeds this device. Safe + deterministic (see device runtime).
-export type DeviceType = 'plate' | 'door';
+export type DeviceType = 'plate' | 'trigger' | 'button' | 'timer' | 'logic' | 'door' | 'turret' | 'spawner';
+const DEVICE_TYPES: readonly DeviceType[] = ['plate', 'trigger', 'button', 'timer', 'logic', 'door', 'turret', 'spawner'];
 export interface DeviceBehavior {
   device: DeviceType;
-  params?: Record<string, number>;
+  params?: Record<string, number | string>;
   inputs?: string[];
 }
 
@@ -371,6 +372,7 @@ export class WorldRealmDurableObject {
         case 'set_behavior': this.setBehavior(conn, msg); break;
         case 'wire': this.wireDevices(conn, msg, true); break;
         case 'unwire': this.wireDevices(conn, msg, false); break;
+        case 'interact_object': if (typeof msg.id === 'string') this.interactObject(conn, msg.id); break;
         // guilds
         case 'guild_create': if (typeof msg.name === 'string') void this.social?.guildCreate(this.actorFor(conn), msg.name).catch(console.error); break;
         case 'guild_invite': if (typeof msg.name === 'string') void this.social?.guildInvite(this.actorFor(conn), msg.name).catch(console.error); break;
@@ -739,6 +741,11 @@ export class WorldRealmDurableObject {
       this.worldObjects.clear();
       this.deviceOut.clear();
       this.deviceOpen.clear();
+      this.buttonPulse.clear();
+      this.deviceTimers.clear();
+      this.deviceCooldowns.clear();
+      this.deviceFx = [];
+      this.deviceSpawned = 0;
       this.worldObjectsLoaded = false;
       this.worldObjectsRealm = null;
       try { await this.ctx.storage.deleteAlarm(); } catch { /* noop */ }
@@ -1048,6 +1055,22 @@ export class WorldRealmDurableObject {
   private deviceOut = new Map<string, boolean>();   // last tick's output per device
   private deviceOpen = new Set<string>();           // doors currently open
   private deviceStateDirty = false;                 // open-state changed → rebroadcast
+  private buttonPulse = new Set<string>();          // buttons interacted since last tick
+  private deviceTimers = new Map<string, number>(); // timer id → next fire sim.time
+  private deviceCooldowns = new Map<string, number>(); // turret/spawner → next allowed sim.time
+  private deviceFx: { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }[] = [];
+  private deviceSpawned = 0;                         // device-spawned mobs alive-ish (soft cap)
+
+  // A player pressed "use" on a button device (proximity-checked) → 1-tick pulse.
+  private interactObject(conn: Conn, id: string): void {
+    const obj = this.worldObjects.get(id);
+    if (!obj || obj.behavior?.device !== 'button') return;
+    const e = this.sim?.entities.get(conn.pid);
+    if (!e) return;
+    const dx = e.pos.x - obj.x, dz = e.pos.z - obj.z;
+    if (dx * dx + dz * dz > 9) return; // must be within ~3u
+    this.buttonPulse.add(id);
+  }
 
   // Assign / clear a device on an owned object.
   private setBehavior(conn: Conn, msg: any): void {
@@ -1059,10 +1082,13 @@ export class WorldRealmDurableObject {
       delete obj.behavior;
     } else {
       const device = String(msg.device) as DeviceType;
-      if (device !== 'plate' && device !== 'door') { this.sendErr(conn, 'Unknown device.'); return; }
-      const params: Record<string, number> = {};
+      if (!DEVICE_TYPES.includes(device)) { this.sendErr(conn, 'Unknown device.'); return; }
+      const params: Record<string, number | string> = {};
       if (msg.params && typeof msg.params === 'object') {
-        for (const [k, v] of Object.entries(msg.params)) { const n = Number(v); if (Number.isFinite(n)) params[k] = n; }
+        for (const [k, v] of Object.entries(msg.params)) {
+          if (typeof v === 'number' && Number.isFinite(v)) params[k] = v;
+          else if (typeof v === 'string') params[k] = v.slice(0, 32);
+        }
       }
       obj.behavior = { device, params, inputs: obj.behavior?.inputs ?? [] };
     }
@@ -1077,7 +1103,7 @@ export class WorldRealmDurableObject {
     const from = this.worldObjects.get(msg.fromId);
     if (!to || !from) return;
     if (!this.canEditObject(conn, to)) { this.sendErr(conn, 'You can only wire what you placed.'); return; }
-    if (!to.behavior) to.behavior = { device: 'door', params: {}, inputs: [] };
+    if (!to.behavior) { this.sendErr(conn, 'Give the target a device first.'); return; }
     const inputs = new Set(to.behavior.inputs ?? []);
     if (connect) inputs.add(msg.fromId); else inputs.delete(msg.fromId);
     to.behavior.inputs = [...inputs];
@@ -1088,32 +1114,81 @@ export class WorldRealmDurableObject {
   // Advance all devices one tick. 1-tick signal propagation (read last tick's
   // outputs) ⇒ deterministic, loop-proof. Called from the sim tick loop.
   private tickDevices(): void {
-    if (!this.sim || this.worldObjects.size === 0) return;
+    const sim = this.sim;
+    if (!sim || this.worldObjects.size === 0) { this.buttonPulse.clear(); return; }
+    const now = sim.time;
     const prev = this.deviceOut;
     const next = new Map<string, boolean>();
-    // emitters first (their output is self-determined)
+    const num = (v: number | string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+
+    // pass 1 — producers compute their output from world state / last-tick inputs
     for (const o of this.worldObjects.values()) {
       const b = o.behavior; if (!b) continue;
-      if (b.device === 'plate') {
-        const r = b.params?.range ?? 2.5;
-        let on = false;
-        this.sim.forEachPlayerInRadius(o.x, o.z, r, () => { on = true; });
-        next.set(o.id, on);
+      switch (b.device) {
+        case 'plate': {
+          let on = false; sim.forEachPlayerInRadius(o.x, o.z, num(b.params?.range, 2.5), () => { on = true; });
+          next.set(o.id, on); break;
+        }
+        case 'trigger': {
+          let on = false; sim.forEachEntityInRadius(o.x, o.z, num(b.params?.range, 4), (e) => { if (e.kind === 'player' || e.kind === 'mob') on = true; });
+          next.set(o.id, on); break;
+        }
+        case 'button':
+          next.set(o.id, this.buttonPulse.has(o.id)); break; // 1-tick pulse on use
+        case 'timer': {
+          const period = Math.max(0.2, num(b.params?.period, 2));
+          let fireAt = this.deviceTimers.get(o.id);
+          if (fireAt === undefined) { this.deviceTimers.set(o.id, now + period); next.set(o.id, false); break; }
+          if (now >= fireAt) { this.deviceTimers.set(o.id, now + period); next.set(o.id, true); }
+          else next.set(o.id, false);
+          break;
+        }
+        case 'logic': {
+          const vals = (b.inputs ?? []).map((src) => !!prev.get(src));
+          const gate = String(b.params?.gate ?? 'and');
+          next.set(o.id, gate === 'or' ? vals.some(Boolean) : gate === 'not' ? !vals.some(Boolean) : vals.length > 0 && vals.every(Boolean));
+          break;
+        }
       }
     }
-    // receivers: doors open while any wired source was on last tick
+    this.buttonPulse.clear();
+
+    // pass 2 — receivers act on powered = OR(inputs' last-tick outputs)
     for (const o of this.worldObjects.values()) {
-      const b = o.behavior; if (!b || b.device !== 'door') continue;
+      const b = o.behavior; if (!b) continue;
       const powered = (b.inputs ?? []).some((src) => prev.get(src));
-      const wasOpen = this.deviceOpen.has(o.id);
-      if (powered && !wasOpen) { this.deviceOpen.add(o.id); this.deviceStateDirty = true; }
-      else if (!powered && wasOpen) { this.deviceOpen.delete(o.id); this.deviceStateDirty = true; }
+      if (b.device === 'door') {
+        const wasOpen = this.deviceOpen.has(o.id);
+        if (powered && !wasOpen) { this.deviceOpen.add(o.id); this.deviceStateDirty = true; }
+        else if (!powered && wasOpen) { this.deviceOpen.delete(o.id); this.deviceStateDirty = true; }
+      } else if (b.device === 'turret') {
+        const enabled = (b.inputs?.length ?? 0) === 0 || powered; // always-on if unwired
+        if (!enabled || now < (this.deviceCooldowns.get(o.id) ?? 0)) continue;
+        const target = sim.nearestHostileMob(o.x, o.z, num(b.params?.range, 12));
+        if (target) {
+          sim.dealExternalDamage(target.id, Math.max(1, num(b.params?.damage, 12)));
+          this.deviceCooldowns.set(o.id, now + Math.max(0.3, num(b.params?.cooldown, 1)));
+          this.deviceFx.push({ from: { x: o.x, y: o.y + 1.2, z: o.z }, to: { x: target.pos.x, y: target.pos.y + 1, z: target.pos.z } });
+        }
+      } else if (b.device === 'spawner') {
+        if (!powered || now < (this.deviceCooldowns.get(o.id) ?? 0)) continue;
+        if (this.deviceSpawned < 40) { // soft cap on device-spawned mobs
+          const ok = sim.spawnDeviceMob(String(b.params?.mob ?? 'wolf'), o.x, o.z);
+          if (ok) this.deviceSpawned++;
+        }
+        this.deviceCooldowns.set(o.id, now + Math.max(1, num(b.params?.cooldown, 5)));
+      }
     }
+
     this.deviceOut = next;
     if (this.deviceStateDirty) {
       this.deviceStateDirty = false;
       this.syncWorldObjectColliders(); // open doors drop their collider
       this.broadcastJson({ t: 'device_states', open: [...this.deviceOpen] });
+    }
+    if (this.deviceFx.length) {
+      this.broadcastJson({ t: 'device_fx', bolts: this.deviceFx });
+      this.deviceFx = [];
     }
   }
 

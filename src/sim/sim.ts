@@ -546,6 +546,41 @@ export class Sim {
     this.playerGrid.forEachInRadius(x, z, r, (e) => { if (!e.dead) fn(e); });
   }
 
+  // Any live entity within a radius — drives trigger-zone devices.
+  forEachEntityInRadius(x: number, z: number, r: number, fn: (e: Entity) => void): void {
+    this.grid.forEachInRadius(x, z, r, (e) => { if (!e.dead) fn(e); });
+  }
+
+  // Nearest live hostile mob within range of an XZ point — turret target select.
+  nearestHostileMob(x: number, z: number, range: number): Entity | null {
+    let best: Entity | null = null, bestD = range * range;
+    this.grid.forEachInRadius(x, z, range, (e, d2) => {
+      if (e.kind === 'mob' && e.hostile && !e.dead && e.ownerId === null && d2 < bestD) { best = e; bestD = d2; }
+    });
+    return best;
+  }
+
+  // Apply damage from a source-less device (turret/trap). Reuses the full combat
+  // path so death, threat-drop, and credit work; no rage/tap is granted.
+  dealExternalDamage(targetId: number, amount: number): void {
+    const t = this.entities.get(targetId);
+    if (!t || t.dead) return;
+    this.dealDamage(null, t, Math.max(1, Math.round(amount)), false, 'physical', 'Turret', 'hit', true);
+  }
+
+  // Spawn one mob from a template at a point — drives spawner devices. Returns
+  // false if the template is unknown.
+  spawnDeviceMob(templateId: string, x: number, z: number): boolean {
+    const template = MOBS[templateId] ?? MOBS.wolf;
+    if (!template) return false;
+    const level = this.rng.int(template.minLevel, template.maxLevel);
+    const mob = createMob(this.nextId++, template, level, this.groundPos(x + (this.rng.next() - 0.5) * 2, z + (this.rng.next() - 0.5) * 2));
+    mob.facing = this.rng.range(-Math.PI, Math.PI);
+    mob.prevFacing = mob.facing;
+    this.addEntity(mob);
+    return true;
+  }
+
   // -------------------------------------------------------------------------
   // Players: join / leave / persistence
   // -------------------------------------------------------------------------

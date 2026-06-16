@@ -821,6 +821,16 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       return;
     }
     if (bestNpc !== null) { hud.openQuestDialog(bestNpc); return; }
+    // world-object buttons: "use" the nearest button device to pulse its signal
+    if (online) {
+      let buttonId: string | null = null, bestBtnD = INTERACT_RANGE * INTERACT_RANGE;
+      for (const o of online.worldObjects.values()) {
+        if (o.behavior?.device !== 'button') continue;
+        const dx = o.x - p.pos.x, dz = o.z - p.pos.z, d2 = dx * dx + dz * dz;
+        if (d2 < bestBtnD) { bestBtnD = d2; buttonId = o.id; }
+      }
+      if (buttonId) { online.interactObject(buttonId); return; }
+    }
     hud.showError('Nothing to interact with.');
   }
 
@@ -1061,6 +1071,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     if (worldObjects && net.consumeDeviceStatesChanged()) worldObjects.setDeviceStates(net.deviceOpen);
     if (worldObjects) {
       for (const fx of net.consumeDestroyedFx()) worldObjects.spawnDebris(fx); // destruction debris
+      for (const b of net.consumeDeviceFx()) worldObjects.spawnTracer(b.from, b.to); // turret bolts
       worldObjects.update(frameDt);
     }
     // In Place tool, the placement ghost follows the cursor on the ground.

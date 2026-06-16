@@ -293,8 +293,27 @@ export class WorldObjectsLayer {
     }
   }
 
-  // Advance the debris simulation. Call once per frame from the render loop.
+  // Turret/trap tracer bolts: a short bright line that fades fast.
+  private readonly tracers: { obj: THREE.Line; mat: THREE.LineBasicMaterial; life: number }[] = [];
+  spawnTracer(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): void {
+    const geom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(from.x, from.y, from.z), new THREE.Vector3(to.x, to.y, to.z),
+    ]);
+    const mat = new THREE.LineBasicMaterial({ color: 0xffd060, transparent: true, depthTest: false });
+    const line = new THREE.Line(geom, mat);
+    line.renderOrder = 998;
+    this.scene.add(line);
+    this.tracers.push({ obj: line, mat, life: 0.18 });
+  }
+
+  // Advance the debris + tracer simulation. Call once per frame from the loop.
   update(dt: number): void {
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const t = this.tracers[i];
+      t.life -= dt;
+      if (t.life <= 0) { this.scene.remove(t.obj); t.obj.geometry.dispose(); t.mat.dispose(); this.tracers.splice(i, 1); continue; }
+      t.mat.opacity = Math.min(1, t.life / 0.18);
+    }
     if (!this.debris.length) return;
     const step = Math.min(dt, 0.05);
     for (let i = this.debris.length - 1; i >= 0; i--) {

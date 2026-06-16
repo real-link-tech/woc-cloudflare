@@ -540,6 +540,10 @@ export class ClientWorld implements IWorld {
       this.deviceStatesDirty = true;
       return;
     }
+    if (msg.t === 'device_fx') {
+      if (Array.isArray(msg.bolts)) for (const b of msg.bolts) this.deviceFx.push(b);
+      return;
+    }
     if (msg.t === 'snap') {
       this.applySnapshot(msg);
     }
@@ -588,10 +592,20 @@ export class ClientWorld implements IWorld {
     this.cmd({ cmd: connect ? 'wire' : 'unwire', fromId, toId });
   }
 
+  // Press "use" on a button device (server proximity-checks).
+  interactObject(id: string): void { this.cmd({ cmd: 'interact_object', id }); }
+
   // Open device-doors (server-authoritative); the render layer lifts them.
   deviceOpen = new Set<string>();
   private deviceStatesDirty = false;
   consumeDeviceStatesChanged(): boolean { const v = this.deviceStatesDirty; this.deviceStatesDirty = false; return v; }
+
+  // Turret/trap tracer bolts to draw this frame.
+  private deviceFx: { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }[] = [];
+  consumeDeviceFx(): { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }[] {
+    if (!this.deviceFx.length) return [];
+    const a = this.deviceFx; this.deviceFx = []; return a;
+  }
 
   consumeSocialChanged(): boolean {
     const v = this.socialDirty;
