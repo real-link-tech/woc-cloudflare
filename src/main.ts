@@ -418,6 +418,24 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       }
     },
     onClickPick: (x, y, button, shift) => handlePick(x, y, button, shift),
+    onBuildPaint: (x, y) => {
+      if (!buildActive || buildTool !== 'place' || !buildAsset || !online || !worldObjects) return;
+      const g = renderer.groundPoint(x, y, world.player.pos.y);
+      if (!g) return;
+      const px = snapXZ(g.x), pz = snapXZ(g.z);
+      // space placements out by roughly the object's footprint so a drag lays a
+      // tidy trail instead of a pile.
+      const spacing = Math.max(gridSnap ? BUILD_GRID : 0.8, buildScale);
+      if (lastPaint && Math.hypot(px - lastPaint.x, pz - lastPaint.z) < spacing) return;
+      lastPaint = { x: px, z: pz };
+      const b = worldObjects.boundsFor(buildAsset.glbUrl);
+      // paint uses a direct place (no per-dab undo entry — would flood the stack)
+      online.placeWorldObject({
+        ipAssetId: buildAsset.ipAssetId, glbUrl: buildAsset.glbUrl, name: buildAsset.name,
+        x: px, y: 0, z: pz, rot: buildRot, scale: buildScale,
+        hw: b?.hw, hd: b?.hd, cx: b?.cx, cz: b?.cz,
+      });
+    },
     onBuildWheel: (deltaSign) => {
       if (!buildActive) return false;
       // scroll up grows, down shrinks (multiplicative feels natural)
@@ -511,6 +529,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   let gridSnap = false;
   const selectedIds = new Set<string>(); // multi-select; insertion order = primary is last
   let grabbing = false;
+  let lastPaint: { x: number; z: number } | null = null; // last drag-paint dab
   const BUILD_SCALE_MIN = 0.3, BUILD_SCALE_MAX = 12;
   const BUILD_ROT_STEP = Math.PI / 4;  // 45° per rotate
   const BUILD_GRID = 1;                // world units when grid snap is on
@@ -570,6 +589,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   function refreshBuildUI(): void {
     document.body.classList.toggle('building', buildActive);
     buildBar.style.display = buildActive ? 'flex' : 'none';
+    input.buildPaintActive = buildActive && buildTool === 'place'; // left-drag paints
     renderRecentsBar();
     worldObjects?.setHighlight(selectedIds);
     const hint = document.getElementById('build-hint');
@@ -607,7 +627,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
   function setBuildTool(tool: BuildTool): void {
     buildTool = tool;
-    grabbing = false;
+    grabbing = false; lastPaint = null;
     if (tool === 'place') { selectedIds.clear(); if (buildAsset) void worldObjects?.setPreview(buildAsset.glbUrl); }
     else worldObjects?.clearPreview();
     refreshBuildUI();

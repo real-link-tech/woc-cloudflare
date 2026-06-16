@@ -18,6 +18,8 @@ export interface InputCallbacks {
   onAbility(slot: number): void;
   onUiKey(key: 'interact' | 'bags' | 'char' | 'spellbook' | 'talents' | 'questlog' | 'map' | 'nameplates' | 'escape' | 'chat' | 'meters' | 'social' | 'arena' | 'leaderboard' | 'build'): void;
   onClickPick(x: number, y: number, button: number, shift: boolean): void;
+  // Left-drag in build Place mode "paints" placements instead of orbiting.
+  onBuildPaint?(x: number, y: number): void;
   /** Build mode: scroll resizes the placement preview. Return true to consume the
    *  wheel event (so it doesn't also zoom the camera). */
   onBuildWheel?: (deltaSign: number) => boolean;
@@ -52,6 +54,7 @@ export class Input {
   hoverActive = false;
   private hoverKind: HoverCursorKind = 'default';
   private mouseCameraEnabled = false;
+  buildPaintActive = false; // set by build Place mode: left-drag paints, not orbits
   private dragDistance = 0;
   private downButton = -1;
   private pointerLockRequestedForDrag = false;
@@ -282,6 +285,12 @@ export class Input {
     const mx = e.movementX ?? 0, my = e.movementY ?? 0;
     if (mx === 0 && my === 0) return;
     this.dragDistance += Math.abs(mx) + Math.abs(my);
+    // Build Place mode: a left-drag paints placements instead of orbiting the
+    // camera. Right-drag still mouselooks (the && !rightDown guard).
+    if (this.buildPaintActive && this.leftDown && !this.rightDown) {
+      this.cb.onBuildPaint?.(this.hoverX, this.hoverY);
+      return;
+    }
     // Engage pointer lock only once the press turns into an actual camera drag —
     // one banner per drag, none for a plain click (#116).
     if (!this.mouseCameraEnabled && this.dragDistance > 5 && !this.pointerLockRequestedForDrag) {
