@@ -530,6 +530,8 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   const selectedIds = new Set<string>(); // multi-select; insertion order = primary is last
   let grabbing = false;
   let lastPaint: { x: number; z: number } | null = null; // last drag-paint dab
+  let wiring = false;                   // wire-tool active (Select)
+  let wireTarget: string | null = null; // the selected object signals wire INTO
   const BUILD_SCALE_MIN = 0.3, BUILD_SCALE_MAX = 12;
   const BUILD_ROT_STEP = Math.PI / 4;  // 45° per rotate
   const BUILD_GRID = 1;                // world units when grid snap is on
@@ -586,18 +588,73 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       recentsBar.appendChild(tile);
     }
   }
+  // -- Behavior device panel (shown for a single selected object in Select) ---
+  const behaviorPanel = document.createElement('div');
+  behaviorPanel.id = 'build-behavior';
+  behaviorPanel.style.display = 'none';
+  document.body.appendChild(behaviorPanel);
+  const DEVICE_OPTS = ['', 'plate', 'trigger', 'button', 'timer', 'logic', 'door', 'turret', 'spawner'];
+  function collectBehaviorParams(): Record<string, number | string> {
+    const out: Record<string, number | string> = {};
+    behaviorPanel.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-pk]').forEach((el) => {
+      out[el.dataset.pk!] = el.dataset.str ? el.value : Number(el.value);
+    });
+    return out;
+  }
+  function renderBehaviorPanel(): void {
+    const single = buildActive && buildTool === 'select' && selectedIds.size === 1 ? selectedObj() : null;
+    behaviorPanel.style.display = single ? 'block' : 'none';
+    if (!single || !online) return;
+    const b = single.behavior;
+    const dev = b?.device ?? '';
+    const numField = (k: string, label: string, def: number) =>
+      `<label>${label}<input data-pk="${k}" type="number" step="0.5" value="${Number(b?.params?.[k] ?? def)}"></label>`;
+    let params = '';
+    if (dev === 'plate' || dev === 'trigger') params = numField('range', 'range', dev === 'plate' ? 2.5 : 4);
+    else if (dev === 'timer') params = numField('period', 'period s', 2);
+    else if (dev === 'turret') params = numField('range', 'range', 12) + numField('damage', 'dmg', 12) + numField('cooldown', 'cd s', 1);
+    else if (dev === 'spawner') params = `<label>mob<input data-pk="mob" data-str="1" value="${String(b?.params?.mob ?? 'wolf')}"></label>` + numField('cooldown', 'cd s', 5);
+    else if (dev === 'logic') params = `<label>gate<select data-pk="gate" data-str="1">${['and', 'or', 'not'].map((g) => `<option ${b?.params?.gate === g ? 'selected' : ''}>${g}</option>`).join('')}</select></label>`;
+    behaviorPanel.innerHTML = `<div class="bh-title">⚙ Behavior</div>`
+      + `<select id="bh-device">${DEVICE_OPTS.map((d) => `<option value="${d}" ${d === dev ? 'selected' : ''}>${d || '(none)'}</option>`).join('')}</select>`
+      + `<div class="bh-params">${params}</div>`
+      + (b?.inputs?.length ? `<div class="bh-wires">↳ ${b.inputs.length} wire(s) in</div>` : '')
+      + `<div class="bh-hint">use 🔌 Wire to connect a signal source → this</div>`;
+    behaviorPanel.querySelector<HTMLSelectElement>('#bh-device')!.onchange = (e) => {
+      online!.setBehavior(single.id, (e.target as HTMLSelectElement).value || null); // reset params to device defaults
+    };
+    behaviorPanel.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-pk]').forEach((el) => {
+      el.onchange = () => online!.setBehavior(single.id, dev || null, collectBehaviorParams());
+    });
+  }
+  function renderWires(): void {
+    if (!worldObjects || !online) return;
+    if (!buildActive) { worldObjects.setWires([]); return; }
+    const pairs: { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }[] = [];
+    for (const o of online.worldObjects.values()) {
+      for (const src of o.behavior?.inputs ?? []) {
+        const s = online.worldObjects.get(src);
+        if (s) pairs.push({ from: { x: s.x, y: s.y + 1, z: s.z }, to: { x: o.x, y: o.y + 1, z: o.z } });
+      }
+    }
+    worldObjects.setWires(pairs);
+  }
+
   function refreshBuildUI(): void {
     document.body.classList.toggle('building', buildActive);
     buildBar.style.display = buildActive ? 'flex' : 'none';
     input.buildPaintActive = buildActive && buildTool === 'place'; // left-drag paints
     renderRecentsBar();
+    renderBehaviorPanel();
+    renderWires();
     worldObjects?.setHighlight(selectedIds);
     const hint = document.getElementById('build-hint');
     if (hint) {
       if (buildActive && buildTool === 'place' && buildAsset) {
         hint.textContent = `Placing “${buildAsset.name}” — scroll: resize (${buildScale.toFixed(1)}×) · drag: paint · click ground: place · click an object: edit it · right-click/Esc: stop`;
       } else if (buildActive && buildTool === 'select') {
-        if (grabbing) hint.textContent = 'Moving — click to drop · scroll: resize · R: rotate';
+        if (wiring) hint.textContent = '🔌 Wiring — click a signal SOURCE to feed it into the selected object · right-click: cancel';
+        else if (grabbing) hint.textContent = 'Moving — click to drop · scroll: resize · R: rotate';
         else if (selectedIds.size) hint.textContent = `${selectedIds.size>1?selectedIds.size+' selected':'Selected'} — Move/↺↻/Duplicate/Delete · scroll: resize · R: rotate · Shift-click: multi · click empty: deselect`;
         else hint.textContent = 'Select tool — click a placed object';
       } else {
@@ -619,6 +676,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       buildBar.appendChild(tbBtn('↺', () => rotateSelected(-BUILD_ROT_STEP)));
       buildBar.appendChild(tbBtn('↻', () => rotateSelected(BUILD_ROT_STEP)));
       buildBar.appendChild(tbBtn('⧉ Duplicate', () => duplicateSelected()));
+      if (selectedIds.size === 1) buildBar.appendChild(tbBtn(wiring ? '🔌 Wiring…' : '🔌 Wire', () => toggleWiring(), wiring));
       buildBar.appendChild(tbBtn('🗑 Delete', () => deleteSelected()));
     }
     if (undoStack.length) buildBar.appendChild(tbBtn('↶ Undo', () => void doUndo()));
@@ -627,7 +685,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
   function setBuildTool(tool: BuildTool): void {
     buildTool = tool;
-    grabbing = false; lastPaint = null;
+    grabbing = false; lastPaint = null; wiring = false; wireTarget = null;
     if (tool === 'place') { selectedIds.clear(); if (buildAsset) void worldObjects?.setPreview(buildAsset.glbUrl); }
     else worldObjects?.clearPreview();
     refreshBuildUI();
@@ -684,6 +742,14 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
   // Grab = the whole selection follows the cursor (moved by the delta from the
   // grab anchor) until the next click drops it. WC3-style; avoids the camera drag.
+  // Wire tool: arm wiring INTO the selected object; the next object clicked
+  // becomes a signal source feeding it.
+  function toggleWiring(): void {
+    const t = selectedObj(); if (!t) return;
+    wiring = !wiring;
+    wireTarget = wiring ? t.id : null;
+    refreshBuildUI();
+  }
   function toggleGrab(): void {
     const objs = selObjs(); if (!objs.length) return;
     if (!grabbing) {
@@ -789,8 +855,10 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
   function exitBuild(): void {
     buildActive = false; buildAsset = null; selectedIds.clear(); grabbing = false;
+    wiring = false; wireTarget = null;
     worldObjects?.clearPreview();
     worldObjects?.setHighlight(new Set());
+    worldObjects?.setWires([]);
     refreshBuildUI();
   }
   // Back-compat shim for the __game export + palette callback.
@@ -853,13 +921,19 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     // Select tool a left-click selects/deselects (Shift-click adds to a multi-
     // selection); in Place tool a left-click drops the ghost at the ground point.
     if (buildActive && online && worldObjects) {
-      if (button !== 0) { exitBuild(); return; }
+      if (button !== 0) { if (wiring) { wiring = false; wireTarget = null; refreshBuildUI(); return; } exitBuild(); return; }
       // While moving, a click drops the grabbed selection at its current spot.
       if (grabbing) { dropGrab(); return; }
+      const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
+      // Wire tool: the clicked object becomes a signal source for wireTarget.
+      if (wiring && wireTarget) {
+        if (hitId && hitId !== wireTarget) online.wireDevice(hitId, wireTarget, true);
+        wiring = false; wireTarget = null; refreshBuildUI();
+        return;
+      }
       // Clicking a placed object ALWAYS selects it for editing — no need to
       // switch to the Select tool first (and a click on an object was never a
       // useful place spot, since placement targets the ground under the cursor).
-      const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
       if (hitId) {
         if (buildTool !== 'select') setBuildTool('select');
         selectObject(hitId, shift); // shift adds to a multi-selection
@@ -1067,7 +1141,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     renderer.camDist = input.camDist;
     renderer.sync(alpha, frameDt, movementFacing);
     // (re)load GLBs for placed world objects only when the mirrored set changed
-    if (worldObjects && net.consumeWorldObjectsChanged()) worldObjects.reconcile(net);
+    if (worldObjects && net.consumeWorldObjectsChanged()) { worldObjects.reconcile(net); if (buildActive) refreshBuildUI(); }
     if (worldObjects && net.consumeDeviceStatesChanged()) worldObjects.setDeviceStates(net.deviceOpen);
     if (worldObjects) {
       for (const fx of net.consumeDestroyedFx()) worldObjects.spawnDebris(fx); // destruction debris
@@ -1139,7 +1213,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       rotateSelected, scaleSelected, duplicateSelected, toggleGrab, toggleBuildMode, enterBuildSelect,
       recents: () => recentAssets.map((a) => a.name),
       undo: doUndo, redo: doRedo, copySelected, paste,
-      setBehavior: (id: string, device: string | null, params?: Record<string, number>) => online?.setBehavior(id, device, params),
+      setBehavior: (id: string, device: string | null, params?: Record<string, number | string>) => online?.setBehavior(id, device, params),
       wire: (fromId: string, toId: string, connect = true) => online?.wireDevice(fromId, toId, connect),
       setGrid: (on: boolean) => { gridSnap = on; refreshBuildUI(); },
       state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId: selectedObj()?.id ?? null, selectedCount: selectedIds.size, grabbing, undoDepth: undoStack.length, redoDepth: redoStack.length }),

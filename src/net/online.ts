@@ -49,7 +49,7 @@ export interface WorldObject {
   footprint?: number;
   placedBy: string;
   ownerId?: number; // placer's character id (permission); undefined on legacy objects
-  behavior?: { device: string; params?: Record<string, number>; inputs?: string[] }; // wired device
+  behavior?: { device: string; params?: Record<string, number | string>; inputs?: string[] }; // wired device
 }
 
 export function buildWebSocketUrl(protocol: string, host: string): string {
@@ -585,7 +585,7 @@ export class ClientWorld implements IWorld {
   }
 
   // Behavior devices: assign/clear a device, and wire signals between objects.
-  setBehavior(id: string, device: string | null, params?: Record<string, number>): void {
+  setBehavior(id: string, device: string | null, params?: Record<string, number | string>): void {
     this.cmd({ cmd: 'set_behavior', id, device, params });
   }
   wireDevice(fromId: string, toId: string, connect = true): void {

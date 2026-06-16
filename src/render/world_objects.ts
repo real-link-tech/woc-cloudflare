@@ -330,6 +330,25 @@ export class WorldObjectsLayer {
     }
   }
 
+  // Build-mode wire overlay: bright lines from each signal source → its target.
+  private wireGroup: THREE.Group | null = null;
+  setWires(pairs: { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }[]): void {
+    if (this.wireGroup) { this.scene.remove(this.wireGroup); this.wireGroup.traverse((o) => { const l = o as THREE.Line; l.geometry?.dispose(); }); this.wireGroup = null; }
+    if (!pairs.length) return;
+    const g = new THREE.Group();
+    const mat = new THREE.LineBasicMaterial({ color: 0x57e0ff, transparent: true, opacity: 0.8, depthTest: false });
+    for (const p of pairs) {
+      const geom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(p.from.x, p.from.y, p.from.z), new THREE.Vector3(p.to.x, p.to.y, p.to.z),
+      ]);
+      const line = new THREE.Line(geom, mat);
+      line.renderOrder = 997;
+      g.add(line);
+    }
+    this.wireGroup = g;
+    this.scene.add(g);
+  }
+
   // The currently-rendered object groups, for build-mode delete raycasting.
   objects(): THREE.Object3D[] {
     return [...this.rendered.values()];
