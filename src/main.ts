@@ -595,7 +595,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     const hint = document.getElementById('build-hint');
     if (hint) {
       if (buildActive && buildTool === 'place' && buildAsset) {
-        hint.textContent = `Placing “${buildAsset.name}” — scroll: resize (${buildScale.toFixed(1)}×) · click: place · right-click/Esc: stop`;
+        hint.textContent = `Placing “${buildAsset.name}” — scroll: resize (${buildScale.toFixed(1)}×) · drag: paint · click ground: place · click an object: edit it · right-click/Esc: stop`;
       } else if (buildActive && buildTool === 'select') {
         if (grabbing) hint.textContent = 'Moving — click to drop · scroll: resize · R: rotate';
         else if (selectedIds.size) hint.textContent = `${selectedIds.size>1?selectedIds.size+' selected':'Selected'} — Move/↺↻/Duplicate/Delete · scroll: resize · R: rotate · Shift-click: multi · click empty: deselect`;
@@ -844,15 +844,22 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     // selection); in Place tool a left-click drops the ghost at the ground point.
     if (buildActive && online && worldObjects) {
       if (button !== 0) { exitBuild(); return; }
-      if (buildTool === 'select') {
-        // While moving, a click drops the grabbed selection at its current spot.
-        if (grabbing) { dropGrab(); return; }
-        const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
-        if (hitId === null && shift) return; // shift-click on empty keeps the selection
-        selectObject(hitId, shift); // null clears; shift toggles into the set
+      // While moving, a click drops the grabbed selection at its current spot.
+      if (grabbing) { dropGrab(); return; }
+      // Clicking a placed object ALWAYS selects it for editing — no need to
+      // switch to the Select tool first (and a click on an object was never a
+      // useful place spot, since placement targets the ground under the cursor).
+      const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
+      if (hitId) {
+        if (buildTool !== 'select') setBuildTool('select');
+        selectObject(hitId, shift); // shift adds to a multi-selection
         return;
       }
-      // place tool: drop the selected asset where the click meets the ground
+      if (buildTool === 'select') {
+        if (!shift) selectObject(null); // click empty ground clears the selection
+        return;
+      }
+      // place tool, empty ground: drop the selected asset where the click meets it
       const g = renderer.groundPoint(x, y, world.player.pos.y);
       if (g && buildAsset) {
         const b = worldObjects.boundsFor(buildAsset.glbUrl);
