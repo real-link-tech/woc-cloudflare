@@ -2427,11 +2427,21 @@ export class Hud {
 
   renderBuildPalette(): void {
     const el = $('#build-panel');
+    const cats = ['tree', 'rock', 'grass', 'flower', 'house', 'building', 'fence', 'bridge', 'crate', 'barrel', 'road', 'tower', 'wall', 'furniture'];
     el.innerHTML = `<div class="panel-title"><span>Build${this.onBuildAssetSelected ? '' : ' <span style="color:#998d6a;font-size:11px">— online only</span>'}</span><span class="x-btn" data-close>${svgIcon('close')}</span></div>`
       + `<div class="build-search"><input type="text" placeholder="Search the asset library…" maxlength="64" /></div>`
+      + `<div class="build-cats">${cats.map((c) => `<button class="build-cat" data-cat="${c}">${c}</button>`).join('')}</div>`
       + `<div class="build-status"></div>`
       + `<div class="build-grid"></div>`;
     const input = el.querySelector<HTMLInputElement>('.build-search input')!;
+    el.querySelectorAll<HTMLButtonElement>('.build-cat').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const c = btn.dataset.cat || '';
+        input.value = c;
+        window.clearTimeout(this.buildSearchTimer);
+        void this.runBuildSearch(c);
+      });
+    });
     input.addEventListener('keydown', (ev) => {
       ev.stopPropagation();
       if (ev.key === 'Enter') {

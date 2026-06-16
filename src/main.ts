@@ -408,7 +408,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
         case 'social': hud.toggleSocial(); break;
         case 'arena': hud.toggleArena(); break;
         case 'leaderboard': hud.toggleLeaderboard(); break;
-        case 'build': hud.toggleBuildPalette(); break;
+        case 'build': if (online) toggleBuildMode(); else hud.toggleBuildPalette(); break;
         case 'escape':
           // build mode swallows Esc first: deselect, else end the build session;
           // then close panels; finally open the game menu if nothing was open.
@@ -536,9 +536,41 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     b.onclick = (e) => { e.stopPropagation(); on(); };
     return b;
   }
+
+  // Persistent "recent blocks" quick-bar: the assets you've placed lately, pinned
+  // in build mode so you can re-select them in one click without re-searching.
+  const RECENTS_KEY = 'woc_build_recents';
+  const RECENTS_MAX = 10;
+  function loadRecents(): BuildAsset[] {
+    try { const a = JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]'); return Array.isArray(a) ? a.slice(0, RECENTS_MAX) : []; }
+    catch { return []; }
+  }
+  let recentAssets: BuildAsset[] = loadRecents();
+  function pushRecent(asset: BuildAsset): void {
+    recentAssets = [asset, ...recentAssets.filter((a) => a.glbUrl !== asset.glbUrl)].slice(0, RECENTS_MAX);
+    try { localStorage.setItem(RECENTS_KEY, JSON.stringify(recentAssets)); } catch { /* private mode */ }
+  }
+  const recentsBar = document.createElement('div');
+  recentsBar.id = 'build-recents';
+  recentsBar.style.display = 'none';
+  document.body.appendChild(recentsBar);
+  function renderRecentsBar(): void {
+    recentsBar.style.display = buildActive && recentAssets.length ? 'flex' : 'none';
+    if (!buildActive || !recentAssets.length) return;
+    recentsBar.innerHTML = '';
+    for (const asset of recentAssets) {
+      const tile = document.createElement('button');
+      tile.className = 'build-recent' + (buildTool === 'place' && buildAsset?.glbUrl === asset.glbUrl ? ' active' : '');
+      tile.title = asset.name;
+      tile.innerHTML = asset.thumbUrl ? `<img src="${asset.thumbUrl}" alt="" loading="lazy" />` : `<span>${asset.name.slice(0, 2)}</span>`;
+      tile.onclick = (e) => { e.stopPropagation(); enterPlace(asset); };
+      recentsBar.appendChild(tile);
+    }
+  }
   function refreshBuildUI(): void {
     document.body.classList.toggle('building', buildActive);
     buildBar.style.display = buildActive ? 'flex' : 'none';
+    renderRecentsBar();
     worldObjects?.setHighlight(selectedIds);
     const hint = document.getElementById('build-hint');
     if (hint) {
@@ -716,10 +748,24 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
   function enterPlace(asset: BuildAsset): void {
     buildActive = true; buildTool = 'place'; buildAsset = asset;
-    buildScale = 1.5; buildRot = 0; selectedIds.clear();
+    buildScale = 1.5; buildRot = 0; selectedIds.clear(); grabbing = false;
+    pushRecent(asset);
     hud.closeBuildPalette(); // free the 3D view for placement clicks
     void worldObjects?.setPreview(asset.glbUrl);
     refreshBuildUI();
+  }
+  // Enter build mode in Select tool with no asset (B with nothing recent).
+  function enterBuildSelect(): void {
+    buildActive = true; buildTool = 'select'; buildAsset = null;
+    selectedIds.clear(); grabbing = false;
+    worldObjects?.clearPreview();
+    refreshBuildUI();
+  }
+  // Toggle the whole build session (bound to the Build key).
+  function toggleBuildMode(): void {
+    if (buildActive) { exitBuild(); return; }
+    if (recentAssets.length) enterPlace(recentAssets[0]); // jump back to your last block
+    else { enterBuildSelect(); hud.toggleBuildPalette(); } // nothing yet → open the library
   }
   function exitBuild(): void {
     buildActive = false; buildAsset = null; selectedIds.clear(); grabbing = false;
@@ -1015,6 +1061,9 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     if (ctrl && k === 'y') { e.preventDefault(); void doRedo(); return; }
     if (ctrl && k === 'c') { e.preventDefault(); copySelected(); return; }
     if (ctrl && k === 'v') { e.preventDefault(); paste(); return; }
+    // 1 = Place tool (re-uses the last/recent block), 2 = Select tool
+    if (k === '1') { e.preventDefault(); if (!buildAsset && recentAssets.length) buildAsset = recentAssets[0]; if (buildAsset) setBuildTool('place'); return; }
+    if (k === '2') { e.preventDefault(); setBuildTool('select'); return; }
     if (k === 'r') {
       e.preventDefault();
       const d = e.shiftKey ? -BUILD_ROT_STEP : BUILD_ROT_STEP;
@@ -1031,7 +1080,8 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     // build controller surface (also used by e2e)
     build: {
       enterPlace, exitBuild, setBuildTool, selectObject, deleteSelected, rotateGhost,
-      rotateSelected, scaleSelected, duplicateSelected, toggleGrab,
+      rotateSelected, scaleSelected, duplicateSelected, toggleGrab, toggleBuildMode, enterBuildSelect,
+      recents: () => recentAssets.map((a) => a.name),
       undo: doUndo, redo: doRedo, copySelected, paste,
       setGrid: (on: boolean) => { gridSnap = on; refreshBuildUI(); },
       state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId: selectedObj()?.id ?? null, selectedCount: selectedIds.size, grabbing, undoDepth: undoStack.length, redoDepth: redoStack.length }),
