@@ -61,7 +61,10 @@ export interface WorldObject {
   x: number; y: number; z: number;
   rot: number;        // yaw, radians
   scale: number;
-  footprint?: number; // unscaled XZ collider radius from the client's measured model bounds
+  // unscaled mesh-BBOX bounds from the client → an OBB collider (hw/hd
+  // half-extents, cx/cz centre offset). Legacy saves use `footprint` (circle).
+  hw?: number; hd?: number; cx?: number; cz?: number;
+  footprint?: number;
   placedBy: string;   // placer's character name
 }
 
@@ -929,17 +932,21 @@ export class WorldRealmDurableObject {
     const rot = Number(msg.rot ?? 0), scale = Number(msg.scale ?? 1);
     if (![x, y, z, rot, scale].every(Number.isFinite)) return;
     if (Math.abs(x) > 2000 || Math.abs(z) > 2000 || Math.abs(y) > 500 || scale <= 0 || scale > 20) return;
-    // Optional client-measured unscaled footprint radius (collision matches the
-    // model's real size). Bounded; absent/garbage falls back to a base radius.
-    const footprintR = Number(msg.footprintR);
-    const footprint = Number.isFinite(footprintR) && footprintR > 0 && footprintR <= 50 ? footprintR : undefined;
+    // Optional client-measured unscaled mesh-BBOX bounds → an OBB collider that
+    // matches the model's real shape. Bounded; absent/garbage half-extents drop
+    // the box (collider falls back to a base-radius circle server-side).
+    const ext = (v: unknown) => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= 100 ? n : undefined; };
+    const off = (v: unknown) => { const n = Number(v); return Number.isFinite(n) && Math.abs(n) <= 100 ? n : 0; };
+    const hw = ext(msg.hw), hd = ext(msg.hd);
+    const box = hw !== undefined && hd !== undefined ? { hw, hd, cx: off(msg.cx), cz: off(msg.cz) } : null;
     const id = `wo_${conn.characterId}_${Date.now().toString(36)}_${this.worldObjects.size}`;
     const obj: WorldObject = {
       id,
       ipAssetId: String(msg.ipAssetId ?? '').slice(0, 128),
       glbUrl: msg.glbUrl,
       name: String(msg.name ?? '').slice(0, 64),
-      x, y, z, rot, scale, footprint,
+      x, y, z, rot, scale,
+      ...(box ?? {}),
       placedBy: conn.name,
     };
     this.worldObjects.set(id, obj);

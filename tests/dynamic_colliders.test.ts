@@ -46,6 +46,31 @@ describe('dynamic (player-placed) colliders', () => {
     expect(isBlocked(SEED, OPEN.x + 3, OPEN.z, 0.5)).toBe(false);
   });
 
+  it('mesh-BBOX bounds make an anisotropic box collider (× scale)', () => {
+    // A long-thin prop: hw 3 (X), hd 0.5 (Z), scale 1, rot 0 → a 6×1 box.
+    setDynamicColliders(SEED, [worldObjectCollider({ x: OPEN.x, z: OPEN.z, scale: 1, rot: 0, hw: 3, hd: 0.5 })]);
+    // Wide axis (X): blocked out to ~hw+body = 3.5.
+    expect(isBlocked(SEED, OPEN.x + 2.8, OPEN.z, 0.5)).toBe(true);
+    // Narrow axis (Z): clear just past hd+body = 1.0 — a circle would still block here.
+    expect(isBlocked(SEED, OPEN.x, OPEN.z + 1.4, 0.5)).toBe(false);
+    // ...and the wide axis still blocks at the same Z offset a circle couldn't reach.
+    expect(isBlocked(SEED, OPEN.x + 2.8, OPEN.z, 0.5)).toBe(true);
+  });
+
+  it('box scales with placement scale', () => {
+    setDynamicColliders(SEED, [worldObjectCollider({ x: OPEN.x, z: OPEN.z, scale: 2, rot: 0, hw: 1, hd: 1 })]);
+    // hw 1 × scale 2 = 2; a point 1.8 away on X is inside 2+body.
+    expect(isBlocked(SEED, OPEN.x + 1.8, OPEN.z, 0.5)).toBe(true);
+  });
+
+  it('centre offset (cx/cz) recentres the box off the origin', () => {
+    // Box centred 4 units +X of the placement origin: the origin itself is clear,
+    // the shifted box blocks around x+4.
+    setDynamicColliders(SEED, [worldObjectCollider({ x: OPEN.x, z: OPEN.z, scale: 1, rot: 0, hw: 1, hd: 1, cx: 4, cz: 0 })]);
+    expect(isBlocked(SEED, OPEN.x, OPEN.z, 0.5)).toBe(false);     // origin clear
+    expect(isBlocked(SEED, OPEN.x + 4, OPEN.z, 0.5)).toBe(true);  // box is over here
+  });
+
   it('clearing the set restores walkability', () => {
     setDynamicColliders(SEED, [worldObjectCollider({ x: OPEN.x, z: OPEN.z, scale: 3 })]);
     expect(isBlocked(SEED, OPEN.x, OPEN.z, 0.5)).toBe(true);

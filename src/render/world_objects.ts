@@ -44,20 +44,24 @@ function loadGlb(url: string): Promise<GLTF> {
   return p;
 }
 
-// Unscaled XZ footprint radius per glbUrl, measured from the parsed model so the
-// server's collision circle can match the model's real size (× placement scale)
-// instead of a one-size-fits-all guess. Populated whenever a model is loaded
-// (preview or spawn); read synchronously at place time via footprintFor().
-const footprintCache = new Map<string, number>();
-function measureFootprint(url: string, scene: THREE.Object3D): number {
-  let r = footprintCache.get(url);
-  if (r !== undefined) return r;
-  const size = new THREE.Box3().setFromObject(scene).getSize(new THREE.Vector3());
-  // half the larger horizontal extent — a circle that covers the model's wider
-  // side. Guard against empty/degenerate boxes (Infinity from no geometry).
-  r = Number.isFinite(size.x) && Number.isFinite(size.z) ? Math.max(size.x, size.z) / 2 : 0;
-  footprintCache.set(url, r);
-  return r;
+// Unscaled mesh bounding-box (BBOX) footprint per glbUrl, measured from the
+// parsed model so the server's collider can match the model's real shape
+// (× placement scale) instead of a one-size-fits-all guess. hw/hd are XZ
+// half-extents; cx/cz is the box centre offset from the model origin (so a model
+// whose origin isn't centred still boxes correctly). Populated on every load
+// (preview or spawn); read synchronously at place time via boundsFor().
+export interface ModelBounds { hw: number; hd: number; cx: number; cz: number; }
+const boundsCache = new Map<string, ModelBounds>();
+function measureBounds(url: string, scene: THREE.Object3D): ModelBounds {
+  let b = boundsCache.get(url);
+  if (b) return b;
+  const box = new THREE.Box3().setFromObject(scene);
+  const size = box.getSize(new THREE.Vector3());
+  const ctr = box.getCenter(new THREE.Vector3());
+  const fin = (n: number) => (Number.isFinite(n) ? n : 0); // guard empty/degenerate boxes
+  b = { hw: Math.max(0, fin(size.x) / 2), hd: Math.max(0, fin(size.z) / 2), cx: fin(ctr.x), cz: fin(ctr.z) };
+  boundsCache.set(url, b);
+  return b;
 }
 
 export class WorldObjectsLayer {
@@ -83,7 +87,7 @@ export class WorldObjectsLayer {
     const token = ++this.previewToken;
     try {
       const gltf = await loadGlb(glbUrl);
-      measureFootprint(glbUrl, gltf.scene); // cache footprint for place-time collision
+      measureBounds(glbUrl, gltf.scene); // cache mesh BBOX for place-time collision
       if (token !== this.previewToken) return; // superseded by a newer selection
       const ghost = gltf.scene.clone(true);
       // Clone materials (the cache shares them across instances) and make them a
@@ -162,7 +166,7 @@ export class WorldObjectsLayer {
   private async spawn(obj: WorldObject, desired: Map<string, WorldObject>): Promise<void> {
     try {
       const gltf = await loadGlb(obj.glbUrl);
-      measureFootprint(obj.glbUrl, gltf.scene); // keep footprint cache warm
+      measureBounds(obj.glbUrl, gltf.scene); // keep BBOX cache warm
       // Bail if it was removed (or somehow already added) while loading.
       if (!desired.has(obj.id) || this.rendered.has(obj.id)) return;
       const group = gltf.scene.clone(true);
@@ -190,12 +194,12 @@ export class WorldObjectsLayer {
     return [...this.rendered.values()];
   }
 
-  // Unscaled XZ footprint radius for a glbUrl, if it has been loaded (preview or
-  // spawn). Sent with place_object so the server's collider matches the model's
-  // real size. Undefined until the model loads — the server falls back to a base
+  // Unscaled mesh-BBOX bounds for a glbUrl, if it has been loaded (preview or
+  // spawn). Sent with place_object so the server's collider box matches the
+  // model. Undefined until the model loads — the server falls back to a base
   // radius, which the preview/selection always populates before a click.
-  footprintFor(glbUrl: string): number | undefined {
-    return footprintCache.get(glbUrl);
+  boundsFor(glbUrl: string): ModelBounds | undefined {
+    return boundsCache.get(glbUrl);
   }
 
   // Raycast the placed-object groups at a screen point and return the owning

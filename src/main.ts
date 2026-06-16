@@ -565,6 +565,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       // place: drop the selected asset where the click meets the ground
       const g = renderer.groundPoint(x, y, world.player.pos.y);
       if (g) {
+        const b = worldObjects.boundsFor(buildMode.glbUrl);
         online.placeWorldObject({
           ipAssetId: buildMode.ipAssetId,
           glbUrl: buildMode.glbUrl,
@@ -573,7 +574,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
           z: g.z,
           rot: 0,
           scale: buildScale,
-          footprintR: worldObjects.footprintFor(buildMode.glbUrl),
+          hw: b?.hw, hd: b?.hd, cx: b?.cx, cz: b?.cz,
         });
       }
       return;

@@ -165,15 +165,29 @@ export function setDynamicColliders(seed: number, colliders: Collider[]): void {
 // of this base radius scaled by the placement scale.
 export const WORLD_OBJECT_BASE_RADIUS = 0.5;
 
-// A circle collider for one placed world object (sim-layer shape — the caller
-// passes the minimal fields so this module stays free of the DO's types).
-// `footprint` is the model's UNSCALED XZ radius (measured client-side); the
-// collider is that × the placement scale, so collision tracks the real size.
+// A collider for one placed world object (sim-layer shape — the caller passes
+// the minimal fields so this module stays free of the DO's types). All bounds
+// are the model's UNSCALED values, multiplied here by the placement scale:
+//   - hw/hd present  → an oriented box (OBB) of half-extents hw/hd, rotated by
+//     the placement yaw, recentred by the model's local AABB centre cx/cz (so a
+//     model whose origin isn't centred still boxes correctly). Best fit for
+//     rectangular things — houses, boats, fences.
+//   - else footprint → a circle of that radius (legacy / round props).
+//   - else            → a base-radius circle.
 export function worldObjectCollider(
-  o: { x: number; z: number; scale: number; footprint?: number },
-): CircleCollider {
+  o: {
+    x: number; z: number; scale: number; rot?: number;
+    hw?: number; hd?: number; cx?: number; cz?: number; footprint?: number;
+  },
+): Collider {
+  const s = Math.max(0, o.scale);
+  if (o.hw !== undefined && o.hd !== undefined && o.hw > 0 && o.hd > 0) {
+    const rot = o.rot ?? 0;
+    const off = rotY((o.cx ?? 0) * s, (o.cz ?? 0) * s, rot); // local centre → world
+    return { type: 'obb', x: o.x + off.x, z: o.z + off.z, hw: o.hw * s, hd: o.hd * s, rot };
+  }
   const base = o.footprint !== undefined && o.footprint > 0 ? o.footprint : WORLD_OBJECT_BASE_RADIUS;
-  return { type: 'circle', x: o.x, z: o.z, r: base * Math.max(0, o.scale) };
+  return { type: 'circle', x: o.x, z: o.z, r: base * s };
 }
 
 // Push (x,z) out of one collider. Returns the corrected point, or null if clear.
