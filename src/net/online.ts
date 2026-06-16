@@ -48,6 +48,7 @@ export interface WorldObject {
   hw?: number; hd?: number; cx?: number; cz?: number;
   footprint?: number;
   placedBy: string;
+  ownerId?: number; // placer's character id (permission); undefined on legacy objects
 }
 
 export function buildWebSocketUrl(protocol: string, host: string): string {
@@ -522,7 +523,7 @@ export class ClientWorld implements IWorld {
       return;
     }
     if (msg.t === 'world_object') {
-      if (msg.op === 'add' && msg.obj) this.worldObjects.set(msg.obj.id, msg.obj as WorldObject);
+      if ((msg.op === 'add' || msg.op === 'update') && msg.obj) this.worldObjects.set(msg.obj.id, msg.obj as WorldObject);
       else if (msg.op === 'remove' && typeof msg.id === 'string') this.worldObjects.delete(msg.id);
       this.worldObjectsDirty = true;
       return;
@@ -551,6 +552,11 @@ export class ClientWorld implements IWorld {
 
   removeWorldObject(id: string): void {
     this.cmd({ cmd: 'remove_object', id });
+  }
+
+  // Move / rotate / rescale an already-placed object (server gates on ownership).
+  updateWorldObject(params: { id: string; x?: number; y?: number; z?: number; rot?: number; scale?: number }): void {
+    this.cmd({ cmd: 'update_object', ...params });
   }
 
   consumeSocialChanged(): boolean {

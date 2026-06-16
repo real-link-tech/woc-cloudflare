@@ -155,12 +155,21 @@ export class WorldObjectsLayer {
         this.rendered.delete(id);
       }
     }
-    // Add objects we don't have yet (and aren't already loading).
+    // Add new objects (and aren't already loading); re-apply the transform of
+    // ones we already render, so an `update_object` (move/rotate/rescale) shows.
     for (const obj of desired.values()) {
-      if (this.rendered.has(obj.id) || this.pending.has(obj.id)) continue;
+      const group = this.rendered.get(obj.id);
+      if (group) { this.applyTransform(group, obj); continue; }
+      if (this.pending.has(obj.id)) continue;
       this.pending.add(obj.id);
       void this.spawn(obj, desired);
     }
+  }
+
+  private applyTransform(group: THREE.Object3D, obj: WorldObject): void {
+    group.position.set(obj.x, groundHeight(obj.x, obj.z, this.seed) + obj.y, obj.z);
+    group.rotation.y = obj.rot;
+    group.scale.setScalar(obj.scale);
   }
 
   private async spawn(obj: WorldObject, desired: Map<string, WorldObject>): Promise<void> {
@@ -170,10 +179,7 @@ export class WorldObjectsLayer {
       // Bail if it was removed (or somehow already added) while loading.
       if (!desired.has(obj.id) || this.rendered.has(obj.id)) return;
       const group = gltf.scene.clone(true);
-      const y = groundHeight(obj.x, obj.z, this.seed) + obj.y;
-      group.position.set(obj.x, y, obj.z);
-      group.rotation.y = obj.rot;
-      group.scale.setScalar(obj.scale);
+      this.applyTransform(group, obj);
       group.userData.worldObjectId = obj.id;
       // Tag every descendant mesh too, so a build-mode raycast that hits a child
       // mesh can walk up to find the owning world-object id.

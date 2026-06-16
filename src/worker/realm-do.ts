@@ -31,6 +31,7 @@ interface Conn {
   characterId: number;
   realm: string;
   name: string;
+  isGm: boolean;      // realm GM/admin — may edit/remove anyone's placed objects
   dbSessionId: number | null;
   lastSave: number;
   // Set of character ids this player has ignored, loaded on join. Drives the
@@ -65,7 +66,8 @@ export interface WorldObject {
   // half-extents, cx/cz centre offset). Legacy saves use `footprint` (circle).
   hw?: number; hd?: number; cx?: number; cz?: number;
   footprint?: number;
-  placedBy: string;   // placer's character name
+  placedBy: string;   // placer's character name (display)
+  ownerId?: number;   // placer's character id (permission). Legacy objects: undefined = unowned.
 }
 
 const MAX_WORLD_OBJECTS = 500;
@@ -211,6 +213,7 @@ export class WorldRealmDurableObject {
       characterId,
       realm,
       name: character.name,
+      isGm: !!character.is_gm,
       dbSessionId: null,
       lastSave: Date.now(),
       blockedIds: new Set(),
@@ -351,7 +354,8 @@ export class WorldRealmDurableObject {
         case 'social_refresh': void this.sendSocialSnapshot(conn.characterId); break;
         // Build the world: place / remove an IPIO library asset.
         case 'place_object': this.placeObject(conn, msg); break;
-        case 'remove_object': if (typeof msg.id === 'string') this.removeObject(msg.id); break;
+        case 'remove_object': if (typeof msg.id === 'string') this.removeObject(conn, msg.id); break;
+        case 'update_object': this.updateObject(conn, msg); break;
         // guilds
         case 'guild_create': if (typeof msg.name === 'string') void this.social?.guildCreate(this.actorFor(conn), msg.name).catch(console.error); break;
         case 'guild_invite': if (typeof msg.name === 'string') void this.social?.guildInvite(this.actorFor(conn), msg.name).catch(console.error); break;
@@ -948,6 +952,7 @@ export class WorldRealmDurableObject {
       x, y, z, rot, scale,
       ...(box ?? {}),
       placedBy: conn.name,
+      ownerId: conn.characterId,
     };
     this.worldObjects.set(id, obj);
     this.syncWorldObjectColliders();
@@ -955,12 +960,37 @@ export class WorldRealmDurableObject {
     void this.saveWorldObjects();
   }
 
-  private removeObject(id: string): void {
-    if (this.worldObjects.delete(id)) {
-      this.syncWorldObjectColliders();
-      this.broadcastJson({ t: 'world_object', op: 'remove', id });
-      void this.saveWorldObjects();
-    }
+  // Edit/remove is allowed for the placer, a realm GM, or on legacy unowned
+  // objects (no ownerId) so existing builds aren't locked out.
+  private canEditObject(conn: Conn, obj: WorldObject): boolean {
+    return obj.ownerId === undefined || obj.ownerId === conn.characterId || conn.isGm;
+  }
+
+  private removeObject(conn: Conn, id: string): void {
+    const obj = this.worldObjects.get(id);
+    if (!obj) return;
+    if (!this.canEditObject(conn, obj)) { this.sendErr(conn, 'You can only remove what you placed.'); return; }
+    this.worldObjects.delete(id);
+    this.syncWorldObjectColliders();
+    this.broadcastJson({ t: 'world_object', op: 'remove', id });
+    void this.saveWorldObjects();
+  }
+
+  // Move / rotate / rescale an existing object. Bounds (hw/hd/cx/cz) and owner
+  // are immutable here — only the transform changes.
+  private updateObject(conn: Conn, msg: any): void {
+    if (typeof msg.id !== 'string') return;
+    const obj = this.worldObjects.get(msg.id);
+    if (!obj) return;
+    if (!this.canEditObject(conn, obj)) { this.sendErr(conn, 'You can only edit what you placed.'); return; }
+    const x = Number(msg.x ?? obj.x), z = Number(msg.z ?? obj.z);
+    const y = Number(msg.y ?? obj.y), rot = Number(msg.rot ?? obj.rot), scale = Number(msg.scale ?? obj.scale);
+    if (![x, y, z, rot, scale].every(Number.isFinite)) return;
+    if (Math.abs(x) > 2000 || Math.abs(z) > 2000 || Math.abs(y) > 500 || scale <= 0 || scale > 20) return;
+    obj.x = x; obj.y = y; obj.z = z; obj.rot = rot; obj.scale = scale;
+    this.syncWorldObjectColliders();
+    this.broadcastJson({ t: 'world_object', op: 'update', obj });
+    void this.saveWorldObjects();
   }
 
   // Feed the current player-placed build into the sim's collision system so the
