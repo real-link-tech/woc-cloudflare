@@ -410,20 +410,20 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
         case 'leaderboard': hud.toggleLeaderboard(); break;
         case 'build': hud.toggleBuildPalette(); break;
         case 'escape':
-          // build mode swallows Esc first (stop placing); then close panels;
-          // finally open the game menu if nothing else was open.
-          if (buildMode) { setBuildMode(null); break; }
+          // build mode swallows Esc first: deselect, else end the build session;
+          // then close panels; finally open the game menu if nothing was open.
+          if (buildActive) { if (selectedId) selectObject(null); else exitBuild(); break; }
           if (!hud.closeAll()) hud.toggleOptionsMenu();
           break;
       }
     },
     onClickPick: (x, y, button) => handlePick(x, y, button),
     onBuildWheel: (deltaSign) => {
-      if (!buildMode) return false;
+      if (!buildActive || buildTool !== 'place') return false;
       // scroll up grows the preview, down shrinks it (multiplicative feels natural)
       const factor = deltaSign < 0 ? 1.12 : 1 / 1.12;
       buildScale = Math.min(BUILD_SCALE_MAX, Math.max(BUILD_SCALE_MIN, buildScale * factor));
-      updateBuildHint();
+      refreshBuildUI();
       return true;
     },
     canUseGameKeys: () => !hud.isModalOpen() && chatInput.style.display !== 'block',
@@ -493,28 +493,85 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     // render whatever the server already mirrored on connect
     worldObjects.reconcile(online);
   }
-  // Build mode: the asset selected in the palette, ready to drop on click. A
-  // translucent preview follows the cursor and the scroll wheel resizes it
-  // (WoW/WC3-style building placement).
-  let buildMode: BuildAsset | null = null;
+  // Build mode (sandbox builder). A build session has two tools: Place (a ghost
+  // of the chosen asset follows the cursor; click drops it) and Select (click a
+  // placed object to select/highlight it, then delete/edit it). A compact,
+  // non-blocking toolbar drives it; the asset palette closes on pick so the 3D
+  // view stays clickable.
+  type BuildTool = 'place' | 'select';
+  let buildActive = false;
+  let buildTool: BuildTool = 'place';
+  let buildAsset: BuildAsset | null = null;
   let buildScale = 1.5;
+  let buildRot = 0;
+  let selectedId: string | null = null;
   const BUILD_SCALE_MIN = 0.3, BUILD_SCALE_MAX = 12;
-  function updateBuildHint(): void {
-    const hint = document.getElementById('build-hint');
-    if (!hint) return;
-    hint.textContent = buildMode
-      ? `Placing “${buildMode.name}” — scroll to resize (${buildScale.toFixed(1)}×) · click to place · Esc / right-click to stop`
-      : '';
+  const BUILD_ROT_STEP = Math.PI / 12; // 15° per Q/E press
+
+  // The toolbar: a flex bar whose container ignores pointer events (so it never
+  // eats build-area clicks); only its buttons capture clicks.
+  const buildBar = document.createElement('div');
+  buildBar.id = 'build-toolbar';
+  buildBar.style.display = 'none';
+  document.body.appendChild(buildBar);
+  function tbBtn(label: string, on: () => void, active = false): HTMLButtonElement {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.className = 'build-tb-btn' + (active ? ' active' : '');
+    b.onclick = (e) => { e.stopPropagation(); on(); };
+    return b;
   }
-  function setBuildMode(asset: BuildAsset | null): void {
-    buildMode = asset;
-    document.body.classList.toggle('building', asset !== null);
-    if (asset) { buildScale = 1.5; void worldObjects?.setPreview(asset.glbUrl); }
+  function refreshBuildUI(): void {
+    document.body.classList.toggle('building', buildActive);
+    buildBar.style.display = buildActive ? 'flex' : 'none';
+    worldObjects?.setHighlight(new Set(selectedId ? [selectedId] : []));
+    const hint = document.getElementById('build-hint');
+    if (hint) {
+      if (buildActive && buildTool === 'place' && buildAsset) {
+        hint.textContent = `Placing “${buildAsset.name}” — scroll: resize (${buildScale.toFixed(1)}×) · click: place · right-click/Esc: stop`;
+      } else if (buildActive && buildTool === 'select') {
+        hint.textContent = selectedId ? 'Selected — Del: delete · click empty: deselect' : 'Select tool — click a placed object';
+      } else {
+        hint.textContent = '';
+      }
+    }
+    if (!buildActive) return;
+    buildBar.innerHTML = '';
+    buildBar.appendChild(tbBtn('🔍 Browse', () => hud.toggleBuildPalette()));
+    buildBar.appendChild(tbBtn('Place', () => setBuildTool('place'), buildTool === 'place'));
+    buildBar.appendChild(tbBtn('Select', () => setBuildTool('select'), buildTool === 'select'));
+    if (buildTool === 'select' && selectedId) buildBar.appendChild(tbBtn('🗑 Delete', () => deleteSelected()));
+    buildBar.appendChild(tbBtn('✕ Done', () => exitBuild()));
+  }
+  function setBuildTool(tool: BuildTool): void {
+    buildTool = tool;
+    if (tool === 'place') { selectedId = null; if (buildAsset) void worldObjects?.setPreview(buildAsset.glbUrl); }
     else worldObjects?.clearPreview();
-    updateBuildHint();
+    refreshBuildUI();
+  }
+  function selectObject(id: string | null): void { selectedId = id; refreshBuildUI(); }
+  function deleteSelected(): void {
+    if (selectedId && online) { online.removeWorldObject(selectedId); selectedId = null; refreshBuildUI(); }
+  }
+  function enterPlace(asset: BuildAsset): void {
+    buildActive = true; buildTool = 'place'; buildAsset = asset;
+    buildScale = 1.5; buildRot = 0; selectedId = null;
+    hud.closeBuildPalette(); // free the 3D view for placement clicks
+    void worldObjects?.setPreview(asset.glbUrl);
+    refreshBuildUI();
+  }
+  function exitBuild(): void {
+    buildActive = false; buildAsset = null; selectedId = null;
+    worldObjects?.clearPreview();
+    worldObjects?.setHighlight(new Set());
+    refreshBuildUI();
+  }
+  // Back-compat shim for the __game export + palette callback.
+  function setBuildMode(asset: BuildAsset | null): void {
+    if (asset) enterPlace(asset); else exitBuild();
   }
   if (online) {
-    hud.onBuildAssetSelected = (asset) => setBuildMode(asset);
+    hud.onBuildAssetSelected = (asset) => enterPlace(asset);
   }
 
   function interactKey(): void {
@@ -555,24 +612,27 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   }
 
   function handlePick(x: number, y: number, button: number): void {
-    // Build mode intercepts clicks: place/delete world objects instead of the
-    // normal target/move handling. Right-click (button 2) exits build mode.
-    if (buildMode && online && worldObjects) {
-      if (button !== 0) { setBuildMode(null); return; }
-      // delete: a left-click directly on a placed object removes it
-      const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
-      if (hitId) { online.removeWorldObject(hitId); return; }
-      // place: drop the selected asset where the click meets the ground
+    // Build mode intercepts clicks. Right-click exits the build session. In
+    // Select tool a left-click selects/deselects a placed object; in Place tool
+    // a left-click drops the ghost at the ground point.
+    if (buildActive && online && worldObjects) {
+      if (button !== 0) { exitBuild(); return; }
+      if (buildTool === 'select') {
+        const hitId = worldObjects.pickWorldObjectId(renderer.raycaster, renderer.camera, x, y);
+        selectObject(hitId); // null clears the selection
+        return;
+      }
+      // place tool: drop the selected asset where the click meets the ground
       const g = renderer.groundPoint(x, y, world.player.pos.y);
-      if (g) {
-        const b = worldObjects.boundsFor(buildMode.glbUrl);
+      if (g && buildAsset) {
+        const b = worldObjects.boundsFor(buildAsset.glbUrl);
         online.placeWorldObject({
-          ipAssetId: buildMode.ipAssetId,
-          glbUrl: buildMode.glbUrl,
-          name: buildMode.name,
+          ipAssetId: buildAsset.ipAssetId,
+          glbUrl: buildAsset.glbUrl,
+          name: buildAsset.name,
           x: g.x,
           z: g.z,
-          rot: 0,
+          rot: buildRot,
           scale: buildScale,
           hw: b?.hw, hd: b?.hd, cx: b?.cx, cz: b?.cz,
         });
@@ -747,10 +807,10 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     renderer.sync(alpha, frameDt, movementFacing);
     // (re)load GLBs for placed world objects only when the mirrored set changed
     if (worldObjects && net.consumeWorldObjectsChanged()) worldObjects.reconcile(net);
-    // In build mode, the placement preview follows the cursor on the ground.
-    if (buildMode && worldObjects && input.hoverActive) {
+    // In Place tool, the placement ghost follows the cursor on the ground.
+    if (buildActive && buildTool === 'place' && worldObjects && input.hoverActive) {
       const g = renderer.groundPoint(input.hoverX, input.hoverY, world.player.pos.y);
-      if (g) worldObjects.updatePreview(g.x, g.z, 0, buildScale);
+      if (g) worldObjects.updatePreview(g.x, g.z, buildRot, buildScale);
     }
     hud.update();
   }
@@ -766,7 +826,20 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     face(facing: unknown) { input.setControllerFacing(facing); },
     stop() { input.clearControllerMoveInput(); },
   };
-  (window as any).__game = { sim: world, world, renderer, input, hud, online, controller, worldObjects, setBuildMode };
+  // Delete key removes the selected object in Select tool.
+  window.addEventListener('keydown', (e) => {
+    if (!buildActive || buildTool !== 'select' || !selectedId) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(); }
+  });
+
+  (window as any).__game = {
+    sim: world, world, renderer, input, hud, online, controller, worldObjects, setBuildMode,
+    // build controller surface (also used by e2e)
+    build: {
+      enterPlace, exitBuild, setBuildTool, selectObject, deleteSelected,
+      state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, selectedId }),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

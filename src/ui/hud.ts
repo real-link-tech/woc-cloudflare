@@ -2405,6 +2405,13 @@ export class Hud {
   // an asset to place. Selecting a tile hands off to main.ts's build mode.
   // -------------------------------------------------------------------------
 
+  // Close the asset palette (e.g. after picking an asset, so it stops covering
+  // the build area and clicks reach the 3D view to place).
+  closeBuildPalette(): void {
+    const el = $('#build-panel');
+    if (el.style.display === 'block') { el.style.display = 'none'; this.hideTooltip(); }
+  }
+
   toggleBuildPalette(): void {
     const el = $('#build-panel');
     if (el.style.display === 'block') { el.style.display = 'none'; this.hideTooltip(); audio.bagClose(); return; }

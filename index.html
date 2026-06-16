@@ -756,6 +756,17 @@
     font-family: var(--title-font); font-size: 13px; text-shadow: 1px 1px 2px #000;
     box-shadow: 0 2px 12px #000a; }
   body.building #build-hint { display: block; }
+  /* Sandbox build toolbar — bottom-centre, non-blocking container (only buttons
+     capture clicks, so it never eats build-area clicks). */
+  #build-toolbar { position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%);
+    z-index: 31; pointer-events: none; display: none; gap: 6px; align-items: center;
+    padding: 6px; border-radius: 10px; background: #1a1410ee; border: 1px solid var(--gold-dim);
+    box-shadow: 0 4px 18px #000a; }
+  .build-tb-btn { pointer-events: auto; cursor: pointer; font-family: var(--title-font);
+    font-size: 12.5px; color: var(--gold); background: #2a2014; border: 1px solid #463a1c;
+    border-radius: 6px; padding: 6px 12px; white-space: nowrap; }
+  .build-tb-btn:hover { border-color: var(--gold-dim); background: #352815; }
+  .build-tb-btn.active { background: var(--gold-dim); color: #1a1410; border-color: var(--gold); }
   .coin { display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: -1px; margin-left: 6px; margin-right: 2px; }
   .coin.g { background: radial-gradient(circle at 35% 30%, #ffe98a, #b8860b); }
   .coin.s { background: radial-gradient(circle at 35% 30%, #e8e8e8, #888); }

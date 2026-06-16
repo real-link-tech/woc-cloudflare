@@ -75,6 +75,9 @@ export class WorldObjectsLayer {
   private preview: THREE.Object3D | null = null;
   private previewUrl: string | null = null;
   private previewToken = 0;
+  // Selection highlight: a bright wireframe box per selected object. BoxHelpers
+  // wrap the rendered group's bounds without touching the GLB's shared materials.
+  private readonly highlights = new Map<string, THREE.BoxHelper>();
 
   constructor(private readonly scene: THREE.Scene, private readonly seed: number) {}
 
@@ -153,6 +156,8 @@ export class WorldObjectsLayer {
       if (!desired.has(id)) {
         this.scene.remove(group);
         this.rendered.delete(id);
+        const helper = this.highlights.get(id);
+        if (helper) { this.scene.remove(helper); helper.geometry.dispose(); this.highlights.delete(id); }
       }
     }
     // Add new objects (and aren't already loading); re-apply the transform of
@@ -170,6 +175,30 @@ export class WorldObjectsLayer {
     group.position.set(obj.x, groundHeight(obj.x, obj.z, this.seed) + obj.y, obj.z);
     group.rotation.y = obj.rot;
     group.scale.setScalar(obj.scale);
+    group.updateMatrixWorld(true);
+    this.highlights.get(obj.id)?.update(); // keep the selection box on a moved object
+  }
+
+  // Show a bright wireframe box around exactly the given object ids (selection).
+  // Idempotent; pass an empty set to clear.
+  setHighlight(ids: Set<string>): void {
+    for (const [id, helper] of this.highlights) {
+      if (!ids.has(id) || !this.rendered.has(id)) {
+        this.scene.remove(helper);
+        helper.geometry.dispose();
+        this.highlights.delete(id);
+      }
+    }
+    for (const id of ids) {
+      if (this.highlights.has(id)) continue;
+      const group = this.rendered.get(id);
+      if (!group) continue;
+      const helper = new THREE.BoxHelper(group, 0xffe27a); // warm gold to match the look
+      (helper.material as THREE.LineBasicMaterial).depthTest = false;
+      helper.renderOrder = 999;
+      this.highlights.set(id, helper);
+      this.scene.add(helper);
+    }
   }
 
   private async spawn(obj: WorldObject, desired: Map<string, WorldObject>): Promise<void> {
