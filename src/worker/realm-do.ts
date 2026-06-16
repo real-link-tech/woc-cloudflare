@@ -68,6 +68,16 @@ export interface WorldObject {
   footprint?: number;
   placedBy: string;   // placer's character name (display)
   ownerId?: number;   // placer's character id (permission). Legacy objects: undefined = unowned.
+  behavior?: DeviceBehavior; // optional wired device (button/plate/door/turret/…)
+}
+
+// A no-code device wired to others by signals. `inputs` are the WorldObject ids
+// whose output signal feeds this device. Safe + deterministic (see device runtime).
+export type DeviceType = 'plate' | 'door';
+export interface DeviceBehavior {
+  device: DeviceType;
+  params?: Record<string, number>;
+  inputs?: string[];
 }
 
 const MAX_WORLD_OBJECTS = 500;
@@ -358,6 +368,9 @@ export class WorldRealmDurableObject {
         case 'place_object': this.placeObject(conn, msg); break;
         case 'remove_object': if (typeof msg.id === 'string') this.removeObject(conn, msg.id); break;
         case 'update_object': this.updateObject(conn, msg); break;
+        case 'set_behavior': this.setBehavior(conn, msg); break;
+        case 'wire': this.wireDevices(conn, msg, true); break;
+        case 'unwire': this.wireDevices(conn, msg, false); break;
         // guilds
         case 'guild_create': if (typeof msg.name === 'string') void this.social?.guildCreate(this.actorFor(conn), msg.name).catch(console.error); break;
         case 'guild_invite': if (typeof msg.name === 'string') void this.social?.guildInvite(this.actorFor(conn), msg.name).catch(console.error); break;
@@ -494,6 +507,7 @@ export class WorldRealmDurableObject {
         this.broadcastSnapshots();
         this.routeEvents(frameEvents);
         this.handleStructureDeaths(frameEvents);
+        this.tickDevices();
         // Cheap (no-DB) ~1 Hz push of friends'/guildmates' live positions.
         socialPosTimer += dt;
         if (socialPosTimer >= 1) {
@@ -723,6 +737,8 @@ export class WorldRealmDurableObject {
       this.marketLoaded = false;
       this.marketRealm = null;
       this.worldObjects.clear();
+      this.deviceOut.clear();
+      this.deviceOpen.clear();
       this.worldObjectsLoaded = false;
       this.worldObjectsRealm = null;
       try { await this.ctx.storage.deleteAlarm(); } catch { /* noop */ }
@@ -1028,14 +1044,89 @@ export class WorldRealmDurableObject {
     this.sim.addStructure(o.id, { x: o.x, y: o.y, z: o.z }, maxHp, o.name || 'Structure');
   }
 
+  // ---- Behavior devices (signal-wired, no-code) ---------------------------
+  private deviceOut = new Map<string, boolean>();   // last tick's output per device
+  private deviceOpen = new Set<string>();           // doors currently open
+  private deviceStateDirty = false;                 // open-state changed → rebroadcast
+
+  // Assign / clear a device on an owned object.
+  private setBehavior(conn: Conn, msg: any): void {
+    if (typeof msg.id !== 'string') return;
+    const obj = this.worldObjects.get(msg.id);
+    if (!obj) return;
+    if (!this.canEditObject(conn, obj)) { this.sendErr(conn, 'You can only configure what you placed.'); return; }
+    if (msg.device == null) {
+      delete obj.behavior;
+    } else {
+      const device = String(msg.device) as DeviceType;
+      if (device !== 'plate' && device !== 'door') { this.sendErr(conn, 'Unknown device.'); return; }
+      const params: Record<string, number> = {};
+      if (msg.params && typeof msg.params === 'object') {
+        for (const [k, v] of Object.entries(msg.params)) { const n = Number(v); if (Number.isFinite(n)) params[k] = n; }
+      }
+      obj.behavior = { device, params, inputs: obj.behavior?.inputs ?? [] };
+    }
+    this.broadcastJson({ t: 'world_object', op: 'update', obj });
+    void this.saveWorldObjects();
+  }
+
+  // Wire fromId's output → toId's input (or remove). Owner-gated on the target.
+  private wireDevices(conn: Conn, msg: any, connect: boolean): void {
+    if (typeof msg.fromId !== 'string' || typeof msg.toId !== 'string' || msg.fromId === msg.toId) return;
+    const to = this.worldObjects.get(msg.toId);
+    const from = this.worldObjects.get(msg.fromId);
+    if (!to || !from) return;
+    if (!this.canEditObject(conn, to)) { this.sendErr(conn, 'You can only wire what you placed.'); return; }
+    if (!to.behavior) to.behavior = { device: 'door', params: {}, inputs: [] };
+    const inputs = new Set(to.behavior.inputs ?? []);
+    if (connect) inputs.add(msg.fromId); else inputs.delete(msg.fromId);
+    to.behavior.inputs = [...inputs];
+    this.broadcastJson({ t: 'world_object', op: 'update', obj: to });
+    void this.saveWorldObjects();
+  }
+
+  // Advance all devices one tick. 1-tick signal propagation (read last tick's
+  // outputs) ⇒ deterministic, loop-proof. Called from the sim tick loop.
+  private tickDevices(): void {
+    if (!this.sim || this.worldObjects.size === 0) return;
+    const prev = this.deviceOut;
+    const next = new Map<string, boolean>();
+    // emitters first (their output is self-determined)
+    for (const o of this.worldObjects.values()) {
+      const b = o.behavior; if (!b) continue;
+      if (b.device === 'plate') {
+        const r = b.params?.range ?? 2.5;
+        let on = false;
+        this.sim.forEachPlayerInRadius(o.x, o.z, r, () => { on = true; });
+        next.set(o.id, on);
+      }
+    }
+    // receivers: doors open while any wired source was on last tick
+    for (const o of this.worldObjects.values()) {
+      const b = o.behavior; if (!b || b.device !== 'door') continue;
+      const powered = (b.inputs ?? []).some((src) => prev.get(src));
+      const wasOpen = this.deviceOpen.has(o.id);
+      if (powered && !wasOpen) { this.deviceOpen.add(o.id); this.deviceStateDirty = true; }
+      else if (!powered && wasOpen) { this.deviceOpen.delete(o.id); this.deviceStateDirty = true; }
+    }
+    this.deviceOut = next;
+    if (this.deviceStateDirty) {
+      this.deviceStateDirty = false;
+      this.syncWorldObjectColliders(); // open doors drop their collider
+      this.broadcastJson({ t: 'device_states', open: [...this.deviceOpen] });
+    }
+  }
+
   // Feed the current player-placed build into the sim's collision system so the
-  // authoritative movement/pathfinding resolves against it. Server-side only —
-  // clients keep rendering from the same WorldObject set and receive snapshots.
+  // authoritative movement/pathfinding resolves against it. Open doors are
+  // excluded so players can pass through. Server-side only.
   private syncWorldObjectColliders(): void {
     if (!this.sim) return;
     setDynamicColliders(
       this.sim.cfg.seed,
-      [...this.worldObjects.values()].map(worldObjectCollider),
+      [...this.worldObjects.values()]
+        .filter((o) => !this.deviceOpen.has(o.id)) // open doors let you through
+        .map(worldObjectCollider),
     );
   }
 

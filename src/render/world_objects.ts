@@ -179,11 +179,35 @@ export class WorldObjectsLayer {
   }
 
   private applyTransform(group: THREE.Object3D, obj: WorldObject): void {
-    group.position.set(obj.x, groundHeight(obj.x, obj.z, this.seed) + obj.y, obj.z);
+    const baseY = groundHeight(obj.x, obj.z, this.seed) + obj.y;
+    group.userData.baseY = baseY;
+    group.userData.objScale = obj.scale;
+    group.position.set(obj.x, baseY, obj.z);
     group.rotation.y = obj.rot;
     group.scale.setScalar(obj.scale);
+    this.applyDoorOffset(obj.id, group); // lift if this is an open device-door
     group.updateMatrixWorld(true);
     // the selection box is a child of the group, so it follows automatically.
+  }
+
+  // Open device-doors rise by their own height so players can pass under them.
+  private readonly deviceOpen = new Set<string>();
+  private applyDoorOffset(id: string, group: THREE.Object3D): void {
+    const baseY = (group.userData.baseY as number) ?? group.position.y;
+    let lift = 0;
+    if (this.deviceOpen.has(id)) {
+      const b = boundsCache.get(group.userData.glbUrl as string);
+      const s = (group.userData.objScale as number) || 1;
+      lift = ((b ? b.hy * 2 : 2) * s) + 0.2;
+    }
+    group.position.y = baseY + lift;
+  }
+
+  // Server-authoritative set of currently-open device-doors; lift/lower them.
+  setDeviceStates(open: Set<string>): void {
+    this.deviceOpen.clear();
+    for (const id of open) this.deviceOpen.add(id);
+    for (const [id, group] of this.rendered) { this.applyDoorOffset(id, group); group.updateMatrixWorld(true); }
   }
 
   // Show a tight wireframe box around exactly the given object ids (selection).

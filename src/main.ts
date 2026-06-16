@@ -1058,6 +1058,7 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     renderer.sync(alpha, frameDt, movementFacing);
     // (re)load GLBs for placed world objects only when the mirrored set changed
     if (worldObjects && net.consumeWorldObjectsChanged()) worldObjects.reconcile(net);
+    if (worldObjects && net.consumeDeviceStatesChanged()) worldObjects.setDeviceStates(net.deviceOpen);
     if (worldObjects) {
       for (const fx of net.consumeDestroyedFx()) worldObjects.spawnDebris(fx); // destruction debris
       worldObjects.update(frameDt);
@@ -1127,6 +1128,8 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       rotateSelected, scaleSelected, duplicateSelected, toggleGrab, toggleBuildMode, enterBuildSelect,
       recents: () => recentAssets.map((a) => a.name),
       undo: doUndo, redo: doRedo, copySelected, paste,
+      setBehavior: (id: string, device: string | null, params?: Record<string, number>) => online?.setBehavior(id, device, params),
+      wire: (fromId: string, toId: string, connect = true) => online?.wireDevice(fromId, toId, connect),
       setGrid: (on: boolean) => { gridSnap = on; refreshBuildUI(); },
       state: () => ({ active: buildActive, tool: buildTool, asset: buildAsset?.name ?? null, scale: buildScale, rot: buildRot, gridSnap, selectedId: selectedObj()?.id ?? null, selectedCount: selectedIds.size, grabbing, undoDepth: undoStack.length, redoDepth: redoStack.length }),
     },

@@ -540,6 +540,12 @@ export class Sim {
     return this.entities.get(entityId)?.structureId ?? null;
   }
 
+  // Live players within a radius of an XZ point — drives pressure-plate / trigger
+  // devices in the realm DO's device runtime.
+  forEachPlayerInRadius(x: number, z: number, r: number, fn: (e: Entity) => void): void {
+    this.playerGrid.forEachInRadius(x, z, r, (e) => { if (!e.dead) fn(e); });
+  }
+
   // -------------------------------------------------------------------------
   // Players: join / leave / persistence
   // -------------------------------------------------------------------------

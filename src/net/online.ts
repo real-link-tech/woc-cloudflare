@@ -49,6 +49,7 @@ export interface WorldObject {
   footprint?: number;
   placedBy: string;
   ownerId?: number; // placer's character id (permission); undefined on legacy objects
+  behavior?: { device: string; params?: Record<string, number>; inputs?: string[] }; // wired device
 }
 
 export function buildWebSocketUrl(protocol: string, host: string): string {
@@ -533,6 +534,12 @@ export class ClientWorld implements IWorld {
       this.worldObjectsDirty = true;
       return;
     }
+    if (msg.t === 'device_states') {
+      // the set of currently-open device doors (server-authoritative)
+      this.deviceOpen = new Set<string>(Array.isArray(msg.open) ? msg.open : []);
+      this.deviceStatesDirty = true;
+      return;
+    }
     if (msg.t === 'snap') {
       this.applySnapshot(msg);
     }
@@ -572,6 +579,19 @@ export class ClientWorld implements IWorld {
   updateWorldObject(params: { id: string; x?: number; y?: number; z?: number; rot?: number; scale?: number }): void {
     this.cmd({ cmd: 'update_object', ...params });
   }
+
+  // Behavior devices: assign/clear a device, and wire signals between objects.
+  setBehavior(id: string, device: string | null, params?: Record<string, number>): void {
+    this.cmd({ cmd: 'set_behavior', id, device, params });
+  }
+  wireDevice(fromId: string, toId: string, connect = true): void {
+    this.cmd({ cmd: connect ? 'wire' : 'unwire', fromId, toId });
+  }
+
+  // Open device-doors (server-authoritative); the render layer lifts them.
+  deviceOpen = new Set<string>();
+  private deviceStatesDirty = false;
+  consumeDeviceStatesChanged(): boolean { const v = this.deviceStatesDirty; this.deviceStatesDirty = false; return v; }
 
   consumeSocialChanged(): boolean {
     const v = this.socialDirty;
